@@ -10,9 +10,14 @@ and `docs/ROADMAP.md` for the full product and engineering plan.
 
 ## Current Status
 
-**Sprint 0 — Project Foundation.** Only the application skeleton, configuration,
-logging, and a health-check endpoint exist. RSS fetching, article extraction,
-persistence, LLM analysis, and the dashboard are not yet implemented.
+**Sprint 1 — Core Domain Models.** The application skeleton, configuration,
+logging, and health-check endpoint from Sprint 0 are in place. Sprint 1 adds
+the core domain layer (`app/domain/`): `ArticleCandidate`, `Article`,
+`ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`, and the
+`ProcessingStatus`, `ExtractionStatus`, and `GSPaper` enums — all validated
+Pydantic models with no dependency on FastAPI, SQLAlchemy, feedparser,
+Trafilatura, or the OpenAI SDK. RSS fetching, article extraction, persistence,
+LLM analysis, and the dashboard are not yet implemented.
 
 ## Requirements
 
@@ -95,7 +100,7 @@ uv run mypy .
 ## Known Limitations
 
 * No RSS fetching, article extraction, persistence, LLM analysis, or
-  dashboard yet — Sprint 0 delivers only the project skeleton, configuration,
-  logging, and a health-check endpoint.
+  dashboard yet. Sprint 1 delivers only the core domain models described
+  above; the pipeline that produces and stores them does not exist yet.
 * No database exists yet; `database/` and `logs/` are present as placeholders
   for later sprints.

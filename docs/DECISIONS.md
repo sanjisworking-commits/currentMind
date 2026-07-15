@@ -1061,6 +1061,96 @@ Revisit only if a future sprint finds a concrete reason the nested layout impede
 
 ---
 
+## ADR-017: Domain Models Use Pydantic v2 with UUID Identities and Timezone-Aware UTC Timestamps
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Sprint 1 requires strongly typed, validated domain models (`ArticleCandidate`, `Article`, `ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`) with no dependency on SQLAlchemy or FastAPI. Three cross-cutting representation questions apply to all of them: what validates the models, how object identity is represented, and how timestamps are represented.
+
+### Decision
+
+* All domain models are ordinary (non-frozen) Pydantic v2 `BaseModel` classes. Freezing was considered and rejected: frozen models still contain mutable `list` fields, so freezing provides only partial, misleading immutability while adding friction for future application-layer code that updates entity state (e.g. `Article.processing_status`).
+* Identity fields use Python's native `UUID` type generated via `Field(default_factory=uuid4)` (`Article.id`, `LearningNote.id`, `LearningNote.article_id`), letting Pydantic handle parsing, validation, and JSON serialization natively. No custom ID-generation or ID-validation helper is introduced.
+* All timestamp fields are timezone-aware `datetime` values. A shared `ensure_utc` validator rejects naive datetimes and normalizes any aware datetime to UTC; a shared `utc_now()` factory is the canonical source of "now" for `created_at`/`updated_at`/`extracted_at` defaults.
+* All domain models inherit a shared `DomainModel` base (`app/domain/base.py`) configuring `extra="forbid"` (unknown fields rejected) and `validate_assignment=True` (attribute reassignment is revalidated, not just initial construction).
+* Cross-field invariants that must hold after attribute assignment (`Article.created_at`/`updated_at` ordering; `ExtractedArticle.status`/`text`/`error_reason` consistency) are implemented as field-level (`field_validator` with `ValidationInfo.data`) or `model_validator(mode="before")` checks rather than `model_validator(mode="after")`. An `after` model validator runs once the candidate value has already been written into the model's `__dict__`; if it then raises, the instance can be left mutated despite the `ValidationError`. Validating from the proposed field state *before* it is committed keeps a rejected assignment fully transactional — the previous valid values are retained.
+
+### Alternatives Considered
+
+1. Frozen Pydantic models for value-object semantics (rejected — false immutability with mutable list fields).
+2. UUID-formatted `str` fields with custom generation/validation helpers (rejected — duplicates what Pydantic already validates natively for `UUID`).
+3. Naive or locally-timed datetimes with conversion at the infrastructure boundary (rejected — pushes UTC discipline out of the domain layer where CLAUDE.md requires it).
+
+### Rationale
+
+Pydantic v2 is already the project's required validation library (CLAUDE.md §10–11) and needs no additional justification. Native `UUID` fields are simpler and less error-prone than hand-rolled string validation, and are trivially serializable. UTC-only, timezone-aware timestamps prevent an entire class of bugs (ambiguous local time, silent naive/aware mixing) at model-construction time rather than downstream.
+
+### Consequences
+
+#### Positive
+
+* No custom ID or timestamp validation code to maintain beyond one small shared `app/domain/validation.py` module.
+* Naive-datetime bugs are caught immediately at construction, not at persistence or display time.
+* `UUID` fields serialize predictably through Pydantic/FastAPI without extra adapters.
+
+#### Negative
+
+* Mutable domain models mean application-layer code (future sprints) must be disciplined about not mutating shared instances unexpectedly; no compiler/runtime enforcement of immutability exists in Sprint 1.
+* Every aware-but-non-UTC datetime is silently converted to UTC rather than rejected, which is intentional but should be understood by future contributors.
+* `validate_assignment=True` validates *attribute reassignment* (`article.processing_status = ...`), not in-place mutation of a field's contents. `article.categories.append("x")` mutates the list object directly and triggers no validation at all; only assigning a whole new list (`article.categories = [...]`) is checked. Future sprints that mutate list-valued fields in place must not assume validation runs.
+
+### Revisit When
+
+Reconsider mutability if a future sprint introduces concurrent or shared mutable references to the same domain instance and bugs result. Reconsider UUID-as-string only if a KOS integration boundary requires a different identity format.
+
+---
+
+## ADR-018: Closed `GSPaper` Enum and Fixed Four-Option `PrelimsQuestion` Contract
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+`LearningNote.gs_papers` and `PrelimsQuestion.options` are both fields where ROADMAP/PRD describe the concept but do not specify an exact representation. Left unconstrained, `gs_papers` could be free-form strings (inconsistent values like `"GS 1"` vs `"gs1"` vs `"General Studies I"`), and `PrelimsQuestion.options` could vary in length in ways that don't match the real UPSC Prelims MCQ format.
+
+### Decision
+
+* `GSPaper` is a closed `StrEnum` with exactly four members: `GS1`, `GS2`, `GS3`, `GS4`. `LearningNote.gs_papers: list[GSPaper]` rejects any other value.
+* `PrelimsQuestion.options` must contain exactly 4 non-empty, non-duplicate strings, and `correct_option` must be a valid index into that list (`0 <= correct_option < 4`).
+
+### Alternatives Considered
+
+1. Free-form `list[str]` for `gs_papers` (rejected — permits inconsistent values that break dashboard filtering, planned in Sprint 7).
+2. Variable-length `options` (e.g. 2–6) to accommodate hypothetical non-standard question formats (rejected — the real UPSC Prelims format is always 4 options; variability would only mask malformed LLM output later).
+
+### Rationale
+
+A closed enum for GS papers gives every future consumer (dashboard filters, LLM output validation in Sprint 5) a single guaranteed vocabulary instead of ad hoc string matching. Fixing `PrelimsQuestion` at exactly 4 options matches the real exam format and turns a malformed LLM response into an immediate, loud validation failure instead of a silently-accepted malformed question — directly satisfying ROADMAP §4's acceptance criterion that "invalid question structures are rejected."
+
+### Consequences
+
+#### Positive
+
+* Dashboard GS-paper filtering (Sprint 7) can rely on a fixed, known set of values with no normalization step.
+* Malformed Prelims MCQs from the future LLM generator (Sprint 5) fail validation immediately rather than reaching storage or the UI.
+
+#### Negative
+
+* If UPSC current affairs content ever maps to a paper outside GS1–GS4 (e.g. Essay paper), the enum must be extended before that content can be represented.
+* If a future prompt design produces a legitimately different option count, this contract must be revisited before that content can be stored.
+
+### Revisit When
+
+Reconsider `GSPaper` if a genuine need arises to classify content under Essay or another non-GS paper. Reconsider the four-option rule only if real LLM-generated question sets show a valid need for a different option count.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -1081,6 +1171,8 @@ Revisit only if a future sprint finds a concrete reason the nested layout impede
 | ADR-014 | Use `pyproject.toml` for project configuration           | Accepted |
 | ADR-015 | Use Alembic for migrations                               | Proposed |
 | ADR-016 | Nest application layers under `app/`                     | Accepted |
+| ADR-017 | Pydantic domain models with UUID identities and UTC times | Accepted |
+| ADR-018 | Closed `GSPaper` enum and four-option `PrelimsQuestion`   | Accepted |
 
 ---
 
