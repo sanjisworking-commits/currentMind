@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Indian Express - UPSC Current Affairs</title>
+    <link>https://indianexpress.com/section/upsc-current-affairs/</link>
+    <description>UPSC Current Affairs</description>
+    <item>
+      <title></title>
+      <link>https://indianexpress.com/article/blank-title</link>
+      <guid isPermaLink="false">ie-blank-title</guid>
+    </item>
+    <item>
+      <title>Bad Link Article</title>
+      <link>not-a-valid-url</link>
+      <guid isPermaLink="false">ie-bad-link</guid>
+    </item>
+    <item>
+      <title>Valid Article Among Bad Ones</title>
+      <link>https://indianexpress.com/article/valid</link>
+      <guid isPermaLink="false">ie-valid</guid>
+    </item>
+  </channel>
+</rss>

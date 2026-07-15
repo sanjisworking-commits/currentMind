@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Indian Express - UPSC Current Affairs</title>
+    <link>https://indianexpress.com/section/upsc-current-affairs/</link>
+    <description>UPSC Current Affairs</description>
+    <item>
+      <title>First</title>
+      <link>https://indianexpress.com/dup-a</link>
+      <guid isPermaLink="false">dup-id-1</guid>
+    </item>
+    <item>
+      <title>Second same url as first</title>
+      <link>https://indianexpress.com/dup-a</link>
+      <guid isPermaLink="false">dup-id-2</guid>
+    </item>
+    <item>
+      <title>Third same id as first</title>
+      <link>https://indianexpress.com/dup-b</link>
+      <guid isPermaLink="false">dup-id-1</guid>
+    </item>
+    <item>
+      <title>Fourth unique</title>
+      <link>https://indianexpress.com/dup-c</link>
+      <guid isPermaLink="false">dup-id-3</guid>
+    </item>
+  </channel>
+</rss>

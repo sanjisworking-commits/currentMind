@@ -1151,6 +1151,50 @@ Reconsider `GSPaper` if a genuine need arises to classify content under Essay or
 
 ---
 
+## ADR-019: Use a Synchronous Application-Layer `ArticleSource` Port for Phase 1
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Sprint 2 introduces the first source adapter (`IndianExpressRSSSource`) and needs a stable contract that application-layer workflows can depend on instead of the concrete Indian Express implementation. Two questions needed settling before writing code: which layer owns the interface and its error type, and whether discovery should be synchronous or asynchronous.
+
+### Decision
+
+* `ArticleSource` (a `Protocol` with `discover_articles(self) -> list[ArticleCandidate]`) and `ArticleSourceError` both live in `app/application/sources.py`. This mirrors `CLAUDE.md`'s treatment of `LearningNoteGenerator` as an "application-facing interface": the port expresses a workflow-level contract, not a domain concept, so it belongs in the application layer rather than `app/domain/`.
+* `app/infrastructure/rss_source.py` implements the port structurally — `IndianExpressRSSSource` does not inherit from `ArticleSource` — and raises `ArticleSourceError` on failure. The exception is defined in the application layer specifically so that future application orchestration code can catch source failures without importing an Indian Express-specific infrastructure module.
+* `discover_articles()` is synchronous. Phase 1 has exactly one source and one blocking feed fetch per call; both `httpx` (used synchronously) and `feedparser` are synchronous APIs, and nothing in the current pipeline performs concurrent discovery across multiple sources.
+
+### Alternatives Considered
+
+1. Define `ArticleSource`/`ArticleSourceError` in `app/domain/` (rejected — the domain layer should stay a pure data-shape layer with no notion of "source" or "adapter" as a concept; `ArticleCandidate` itself is domain, the port around it is not).
+2. Define `ArticleSourceError` inside `app/infrastructure/rss_source.py` (rejected — this would force any future application-layer error handling to import an Indian Express-specific infrastructure module just to catch a generic discovery failure).
+3. An `async def discover_articles()` port (rejected for Phase 1 — no current concurrency requirement; would add an async surface with no present consumer).
+
+### Rationale
+
+Keeping the port and its error type together in the application layer, decoupled from any concrete adapter, lets a future `ProcessNewsFeedService` (Sprint 6) depend only on `app.application.sources` — never on `app.infrastructure.rss_source` — matching ADR-007's source-neutral interface goal. Staying synchronous avoids introducing async machinery (event loops, awaitable interfaces) before any real concurrency need exists, consistent with CLAUDE.md's simplicity rules.
+
+### Consequences
+
+#### Positive
+
+* Application code and tests can depend on `app.application.sources` alone.
+* No async infrastructure is introduced prematurely.
+* The same pattern (port + error in `app/application/`) can be reused for `ArticleExtractor` (Sprint 3) and `LearningNoteGenerator` (Sprint 5) without re-litigating layer placement.
+
+#### Negative
+
+* If a later phase needs concurrent discovery across multiple sources, `discover_articles()` and its callers will need to be revisited together.
+
+### Revisit When
+
+Reconsider synchronous execution only when a real concurrency requirement appears (for example, multiple sources fetched concurrently). Deduplication policy, HTTP client ownership, and feed-entry field mapping are documented in code and tests (`app/infrastructure/rss_source.py`, `tests/infrastructure/test_rss_source.py`) and in the README rather than as separate ADRs, since they are implementation-level choices rather than decisions expected to be revisited independently.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -1173,6 +1217,7 @@ Reconsider `GSPaper` if a genuine need arises to classify content under Essay or
 | ADR-016 | Nest application layers under `app/`                     | Accepted |
 | ADR-017 | Pydantic domain models with UUID identities and UTC times | Accepted |
 | ADR-018 | Closed `GSPaper` enum and four-option `PrelimsQuestion`   | Accepted |
+| ADR-019 | Synchronous application-layer `ArticleSource` port        | Accepted |
 
 ---
 
