@@ -907,9 +907,9 @@ The following decisions should be confirmed or amended by Claude Code after insp
 
 ## ADR-014: Use `pyproject.toml` for Dependency and Tool Configuration
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-07-15
-**Decision Owner:** Musa
+**Decision Owner:** Musa / Claude Code
 
 ### Context
 
@@ -917,7 +917,9 @@ Python dependency management and development tools require configuration.
 
 Keeping configuration distributed across multiple files may increase maintenance overhead.
 
-### Proposed Decision
+Sprint 0 also required selecting the precise package manager, left open by the original proposal.
+
+### Decision
 
 Use `pyproject.toml` as the central configuration file for:
 
@@ -928,18 +930,19 @@ Use `pyproject.toml` as the central configuration file for:
 * Pytest
 * Build configuration
 
-The precise package manager may be selected during Sprint 0.
+The package manager is `uv`, with `uv.lock` committed for reproducible installs. The build backend is `hatchling`.
 
 ### Alternatives Considered
 
-1. `pyproject.toml`
+1. `pyproject.toml` with `uv` (selected)
 2. `requirements.txt` plus separate tool files
 3. Poetry-specific project configuration
 4. Pipenv
+5. Plain `pip` + `venv` with no lock file
 
 ### Rationale
 
-`pyproject.toml` is the modern standard and centralizes configuration.
+`pyproject.toml` is the modern standard and centralizes configuration. `uv` provides a single fast tool for environment creation, dependency resolution, and lock-file management, natively driven by `pyproject.toml`. `hatchling` is a minimal, standard build backend requiring no additional configuration for a pure-Python package.
 
 ### Consequences
 
@@ -948,15 +951,16 @@ The precise package manager may be selected during Sprint 0.
 * Fewer configuration files
 * Modern Python tooling compatibility
 * Easier onboarding
+* Reproducible installs via `uv.lock`
 
 #### Negative
 
-* Package-manager-specific choices still require agreement.
+* Contributors without `uv` installed must use the documented `pip install -e ".[dev]"` fallback.
 * Some deployment workflows may still generate lock or requirements files.
 
 ### Revisit When
 
-Finalize during Sprint 0.
+Reconsider if `uv` adoption creates friction for contributors or deployment environments.
 
 ---
 
@@ -1007,6 +1011,56 @@ Finalize before Sprint 4 persistence work.
 
 ---
 
+## ADR-016: Nest Application Layers Under `app/`
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+`docs/ENGINEERING_SPEC.md` §4 depicts `domain/`, `application/`, `infrastructure/`, and `presentation/` as top-level directories alongside `app/`. `docs/ROADMAP.md` §3's Sprint 0 "Suggested Project Structure" nests those same four layers inside `app/`. The two documents describe the same layering but disagree on directory nesting, and Sprint 0 required a single, unambiguous structure before any code could be written.
+
+### Decision
+
+The four architectural layers are implemented as subpackages of `app/`:
+
+```text
+app/
+├── domain/
+├── application/
+├── infrastructure/
+└── presentation/
+```
+
+`ENGINEERING_SPEC.md`'s layering rules (dependency direction, what each layer may and may not import) apply unchanged; only the physical nesting differs from its diagram.
+
+### Alternatives Considered
+
+1. Flat top-level layer directories, as literally diagrammed in `ENGINEERING_SPEC.md` §4.
+2. Nested layers under `app/`, as diagrammed in `ROADMAP.md` §3 (selected).
+
+### Rationale
+
+`ROADMAP.md`'s structure is the more specific, sprint-scoped instruction, and nesting under `app/` keeps all application code under one importable package root, which is the more common convention and requires no `PYTHONPATH`/packaging workaround. The choice is cosmetic with respect to the mandatory layering and dependency rules — both documents require the same isolation between layers.
+
+### Consequences
+
+#### Positive
+
+* Removes ambiguity that would otherwise recur every time a new module is added.
+* Single importable root package (`app`) simplifies imports and packaging.
+
+#### Negative
+
+* Diverges from the literal diagram in `docs/ENGINEERING_SPEC.md` §4, which is not itself updated by this decision.
+
+### Revisit When
+
+Revisit only if a future sprint finds a concrete reason the nested layout impedes packaging or deployment.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -1024,8 +1078,9 @@ Finalize before Sprint 4 persistence work.
 | ADR-011 | Store prompt templates outside Python source files       | Accepted |
 | ADR-012 | Keep automated tests independent of live services        | Accepted |
 | ADR-013 | Use server-rendered pages for the Phase 1 dashboard      | Accepted |
-| ADR-014 | Use `pyproject.toml` for project configuration           | Proposed |
+| ADR-014 | Use `pyproject.toml` for project configuration           | Accepted |
 | ADR-015 | Use Alembic for migrations                               | Proposed |
+| ADR-016 | Nest application layers under `app/`                     | Accepted |
 
 ---
 
