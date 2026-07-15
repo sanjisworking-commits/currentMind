@@ -104,3 +104,62 @@ def test_article_content_with_braces_and_dollar_signs_is_inserted_literally(
     tricky_text = 'Body with {braces}, a JSON snippet {"key": "value"}, and a literal $5 price.'
     rendered = template.substitute(article_text=tricky_text)
     assert tricky_text in rendered
+
+
+# --- prompt-injection boundary content ---------------------------------------
+#
+# These tests verify the *construction and boundaries* of the shipped prompts
+# - that metadata and body are explicitly labelled untrusted and placed in
+# clearly delimited blocks. They do not, and cannot, claim that prompt
+# injection is mathematically eliminated.
+
+
+def test_shipped_system_prompt_identifies_metadata_and_body_as_untrusted() -> None:
+    template = load_prompt_template(
+        "learning_note_v1_system.txt", expected_placeholders=frozenset()
+    )
+    rendered = template.substitute()
+    assert "untrusted" in rendered.lower()
+    assert "metadata" in rendered.lower()
+    assert "body" in rendered.lower()
+
+
+def test_shipped_system_prompt_states_delimiter_looking_text_remains_untrusted() -> None:
+    template = load_prompt_template(
+        "learning_note_v1_system.txt", expected_placeholders=frozenset()
+    )
+    rendered = template.substitute().lower()
+    assert "delimiter" in rendered
+    assert "not a boundary" in rendered or "never as directions" in rendered
+
+
+def test_shipped_user_prompt_places_metadata_in_its_own_untrusted_block() -> None:
+    template = load_prompt_template(
+        "learning_note_v1_user.txt",
+        expected_placeholders=frozenset({"article_metadata", "article_text", "repair_instruction"}),
+    )
+    sentinel = "SENTINEL-METADATA-VALUE"
+    rendered = template.substitute(
+        article_metadata=sentinel, article_text="Body.", repair_instruction=""
+    )
+    begin = rendered.index("BEGIN ARTICLE METADATA")
+    end = rendered.index("END ARTICLE METADATA")
+    sentinel_index = rendered.index(sentinel)
+    assert begin < sentinel_index < end
+    assert "UNTRUSTED SOURCE DATA" in rendered[begin:end]
+
+
+def test_shipped_user_prompt_places_body_in_its_own_untrusted_block() -> None:
+    template = load_prompt_template(
+        "learning_note_v1_user.txt",
+        expected_placeholders=frozenset({"article_metadata", "article_text", "repair_instruction"}),
+    )
+    sentinel = "SENTINEL-BODY-VALUE"
+    rendered = template.substitute(
+        article_metadata="Title: X", article_text=sentinel, repair_instruction=""
+    )
+    begin = rendered.index("BEGIN ARTICLE BODY")
+    end = rendered.index("END ARTICLE BODY")
+    sentinel_index = rendered.index(sentinel)
+    assert begin < sentinel_index < end
+    assert "UNTRUSTED SOURCE DATA" in rendered[begin:end]

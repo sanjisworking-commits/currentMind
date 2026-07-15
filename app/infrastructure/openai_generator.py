@@ -36,7 +36,12 @@ logger = logging.getLogger(__name__)
 PROMPT_VERSION = "v1"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_SDK_MAX_RETRIES = 2
-DEFAULT_MAX_VALIDATION_ATTEMPTS = 3
+
+# Fixed Sprint 5 application policy: at most one original structured-output
+# request plus two validation-repair requests. Not configurable by callers -
+# SDK transport retries (`sdk_max_retries`) remain separately configurable,
+# but this bound on *application-level* validation retries is not.
+MAX_VALIDATION_ATTEMPTS = 3
 
 _SYSTEM_PROMPT_FILENAME = f"learning_note_{PROMPT_VERSION}_system.txt"
 _USER_PROMPT_FILENAME = f"learning_note_{PROMPT_VERSION}_user.txt"
@@ -121,15 +126,12 @@ class OpenAILearningNoteGenerator:
         responses: _ResponsesClient | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         sdk_max_retries: int = DEFAULT_SDK_MAX_RETRIES,
-        max_validation_attempts: int = DEFAULT_MAX_VALIDATION_ATTEMPTS,
         prompts_dir: Path | None = None,
     ) -> None:
         if not model_name.strip():
             raise ValueError("model_name must be a non-empty string")
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be greater than zero")
-        if max_validation_attempts < 1:
-            raise ValueError("max_validation_attempts must be at least 1")
 
         if responses is not None:
             if api_key is not None:
@@ -150,7 +152,6 @@ class OpenAILearningNoteGenerator:
             raise ValueError("provide exactly one of `api_key` or `responses`")
 
         self._model_name = model_name
-        self._max_validation_attempts = max_validation_attempts
         self._system_template = load_prompt_template(
             _SYSTEM_PROMPT_FILENAME,
             expected_placeholders=frozenset(),
@@ -170,7 +171,7 @@ class OpenAILearningNoteGenerator:
         article_metadata = _build_article_metadata(article)
 
         last_validation_error: pydantic.ValidationError | None = None
-        for attempt in range(1, self._max_validation_attempts + 1):
+        for attempt in range(1, MAX_VALIDATION_ATTEMPTS + 1):
             repair_instruction = (
                 "" if attempt == 1 else _build_repair_instruction(last_validation_error)
             )
@@ -294,8 +295,8 @@ class OpenAILearningNoteGenerator:
         logger.error(
             "learning note validation exhausted article_id=%s attempts=%d",
             article.id,
-            self._max_validation_attempts,
+            MAX_VALIDATION_ATTEMPTS,
         )
         raise LearningNoteValidationError(
-            f"exhausted {self._max_validation_attempts} validation attempts"
+            f"exhausted {MAX_VALIDATION_ATTEMPTS} validation attempts"
         ) from last_validation_error
