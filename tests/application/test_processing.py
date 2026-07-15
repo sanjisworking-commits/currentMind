@@ -510,6 +510,80 @@ def test_source_discovery_failure_propagates_without_summary() -> None:
         service.process()
 
 
+def test_insert_race_via_external_id_with_changed_url_refreshes_before_extraction() -> None:
+    articles = InMemoryArticleRepository()
+    notes = InMemoryLearningNoteRepository(articles)
+    old_url = "https://indianexpress.com/upsc/old-url"
+    new_url = _URL
+    competitor = Article(
+        source="indian_express",
+        external_id="ext-1",
+        title="A Title",
+        url=old_url,
+        processing_status=ProcessingStatus.DISCOVERED,
+    )
+
+    def slip_in_competitor(article: Article) -> None:
+        if articles.get_by_source_external_id("indian_express", "ext-1") is None:
+            articles.seed(competitor)
+
+    articles.before_add = slip_in_competitor
+    extractor = FakeArticleExtractor({new_url: _success_extraction(new_url)})
+    service, _, _, _, _, _ = _make_service(
+        articles=articles,
+        notes=notes,
+        extractor=extractor,
+        generator=_scripted_note_generator(articles),
+    )
+
+    summary = service.process()
+
+    # Recovery resolved by (source, external_id); the changed URL was refreshed
+    # and used for extraction - the stale URL was never extracted from.
+    assert extractor.calls == [new_url]
+    assert new_url not in {old_url}  # sanity
+    stored = articles.stored(competitor.id)
+    assert stored.url == new_url
+    assert summary.new_articles == 0
+    assert summary.successfully_analyzed == 1
+    assert len(articles.list_recent()) == 1  # only one Article exists
+
+
+def test_insert_race_url_refresh_uniqueness_conflict_becomes_identity_conflict() -> None:
+    articles = InMemoryArticleRepository()
+    old_url = "https://indianexpress.com/upsc/old-url"
+    competitor = Article(
+        source="indian_express",
+        external_id="ext-1",
+        title="A Title",
+        url=old_url,
+        processing_status=ProcessingStatus.DISCOVERED,
+    )
+
+    def slip_in_competitor(article: Article) -> None:
+        if articles.get_by_source_external_id("indian_express", "ext-1") is None:
+            articles.seed(competitor)
+
+    articles.before_add = slip_in_competitor
+
+    def fail_refresh(article: Article) -> Exception | None:
+        if article.id == competitor.id and article.url == _URL:
+            return DuplicateArticleError("another article already owns this url")
+        return None
+
+    articles.fail_update_when = fail_refresh
+    service, _, extractor, _, _, _ = _make_service(articles=articles)
+
+    summary = service.process()
+
+    assert summary.failed == 1
+    detail = summary.failure_details[0]
+    assert detail.stage is PipelineStage.IDENTITY_RESOLUTION
+    assert detail.reason_category == "identity_conflict"
+    assert detail.article_id == competitor.id
+    assert extractor.calls == []  # never extracted from the stale URL
+
+
 # --- changed candidate URL ---------------------------------------------------------
 
 
@@ -609,6 +683,151 @@ def test_extraction_failure_mapping(
     assert stored.failure_reason == expected_reason
     # Unusable partial extraction text is never persisted.
     assert stored.raw_text is None
+
+
+# --- extractor result URL correlation ---------------------------------------------------
+
+
+def test_success_result_with_wrong_url_is_rejected() -> None:
+    wrong_url = "https://attacker.invalid/upsc/other?token=SECRET-URL-TOKEN"
+    articles = InMemoryArticleRepository()
+    extractor = FakeArticleExtractor(
+        {_URL: ExtractedArticle(url=wrong_url, status=ExtractionStatus.SUCCESS, text=_TEXT)}
+    )
+    service, _, _, _, _, generator = _make_service(
+        articles=articles, extractor=extractor, generator=_scripted_note_generator(articles)
+    )
+
+    summary = service.process()
+
+    assert summary.failed == 1
+    assert summary.successfully_extracted == 0
+    detail = summary.failure_details[0]
+    assert detail.stage is PipelineStage.EXTRACTION
+    assert detail.reason_category == "result_url_mismatch"
+    assert detail.message == "extraction: result URL mismatch"
+    # No generator call, no mismatched text persisted, no raw result URL leaked.
+    assert generator.calls == []
+    stored = articles.list_recent()[0]
+    assert stored.processing_status is ProcessingStatus.FAILED
+    assert stored.raw_text is None
+    assert "SECRET-URL-TOKEN" not in detail.message
+    assert detail.url is not None and "attacker.invalid" not in detail.url
+
+
+def test_failed_result_with_wrong_url_is_rejected_as_mismatch() -> None:
+    wrong_url = "https://attacker.invalid/upsc/other"
+    articles = InMemoryArticleRepository()
+    extractor = FakeArticleExtractor(
+        {
+            _URL: ExtractedArticle(
+                url=wrong_url, status=ExtractionStatus.NETWORK_ERROR, error_reason="x"
+            )
+        }
+    )
+    service, _, _, _, _, generator = _make_service(articles=articles, extractor=extractor)
+
+    summary = service.process()
+
+    assert summary.failed == 1
+    detail = summary.failure_details[0]
+    assert detail.stage is PipelineStage.EXTRACTION
+    # The URL-mismatch guard runs before status mapping.
+    assert detail.reason_category == "result_url_mismatch"
+    assert detail.message == "extraction: result URL mismatch"
+    assert generator.calls == []
+    stored = articles.list_recent()[0]
+    assert stored.failure_reason == "extraction: result URL mismatch"
+    assert stored.raw_text is None
+
+
+def test_url_mismatch_logs_do_not_leak_result_url(caplog: pytest.LogCaptureFixture) -> None:
+    wrong_url = "https://attacker.invalid/upsc/LEAK-MARKER"
+    articles = InMemoryArticleRepository()
+    extractor = FakeArticleExtractor(
+        {_URL: ExtractedArticle(url=wrong_url, status=ExtractionStatus.SUCCESS, text=_TEXT)}
+    )
+    service, _, _, _, _, _ = _make_service(articles=articles, extractor=extractor)
+
+    with caplog.at_level(logging.INFO):
+        service.process()
+
+    assert "LEAK-MARKER" not in caplog.text
+    assert "attacker.invalid" not in caplog.text
+
+
+# --- Learning Note ownership -------------------------------------------------------------
+
+
+def test_note_with_foreign_article_id_is_rejected_before_persistence() -> None:
+    articles = InMemoryArticleRepository()
+    notes = InMemoryLearningNoteRepository(articles)
+    # Another, unrelated, already-analyzed Article the note will wrongly claim.
+    other = _seed_article(
+        articles,
+        status=ProcessingStatus.ANALYZED,
+        raw_text=_TEXT,
+        url="https://indianexpress.com/upsc/other-article",
+        external_id="other",
+    )
+    other_note = _note_for(other.id)
+    notes.seed(other_note)
+
+    class _MisownedGenerator(FakeLearningNoteGenerator):
+        def generate(self, article: Article) -> LearningNote:
+            self.calls.append(article)
+            return _note_for(other.id)  # claims the wrong Article
+
+    generator = _MisownedGenerator()
+    service, _, _, _, _, _ = _make_service(
+        articles=articles, notes=notes, generator=generator
+    )
+
+    summary = service.process()
+
+    assert summary.failed == 1
+    assert summary.successfully_analyzed == 0
+    detail = summary.failure_details[0]
+    assert detail.stage is PipelineStage.ANALYSIS
+    assert detail.reason_category == "result_identity_mismatch"
+    assert detail.message == "analysis: learning note article mismatch"
+
+    # The note repository received no add call for the current Article.
+    assert notes.add_calls == []
+    # The other Article and its note are untouched.
+    assert articles.stored(other.id).processing_status is ProcessingStatus.ANALYZED
+    persisted_other = notes.get_by_article_id(other.id)
+    assert persisted_other is not None
+    assert persisted_other.id == other_note.id
+
+    # The current Article is FAILED with retained text, not analyzed.
+    current = articles.get_by_url(_URL)
+    assert current is not None
+    assert current.processing_status is ProcessingStatus.FAILED
+    assert current.failure_reason == "analysis: learning note article mismatch"
+    assert current.raw_text == _TEXT
+    assert notes.get_by_article_id(current.id) is None
+
+
+def test_note_ownership_mismatch_message_hides_foreign_id(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    articles = InMemoryArticleRepository()
+    foreign_id = uuid4()
+
+    class _MisownedGenerator(FakeLearningNoteGenerator):
+        def generate(self, article: Article) -> LearningNote:
+            self.calls.append(article)
+            return _note_for(foreign_id)
+
+    service, _, _, _, _, _ = _make_service(articles=articles, generator=_MisownedGenerator())
+
+    with caplog.at_level(logging.INFO):
+        summary = service.process()
+
+    assert str(foreign_id) not in caplog.text
+    for detail in summary.failure_details:
+        assert str(foreign_id) not in detail.message
 
 
 # --- analysis outcomes ----------------------------------------------------------------

@@ -126,8 +126,14 @@ def _print_retry_result(result: ArticleProcessingResult) -> None:
 def _run_process_feed(service: ProcessNewsFeedService, *, retry_failed: bool) -> int:
     try:
         summary = service.process(retry_failed=retry_failed)
-    except ArticleSourceError as exc:
-        print(f"Feed discovery failed: {exc}", file=sys.stderr)
+    except ArticleSourceError:
+        # The underlying message may embed feed URLs, query tokens, or raw
+        # network text; the adapter has already logged and chained it. Print a
+        # fixed, safe message only.
+        print(
+            "Feed discovery failed. Verify RSS_URL and network/feed availability.",
+            file=sys.stderr,
+        )
         return 1
     _print_summary(summary)
     return 0 if summary.failed == 0 else 1

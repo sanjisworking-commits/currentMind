@@ -60,8 +60,10 @@ REASON_EXTRACTION_INSUFFICIENT = "extraction: insufficient content"
 REASON_EXTRACTION_NETWORK = "extraction: network error"
 REASON_EXTRACTION_UNSUPPORTED = "extraction: unsupported page"
 REASON_EXTRACTION_UNEXPECTED = "extraction: unexpected error"
+REASON_EXTRACTION_URL_MISMATCH = "extraction: result URL mismatch"
 REASON_ANALYSIS_PROVIDER = "analysis: provider failure"
 REASON_ANALYSIS_VALIDATION = "analysis: validation exhausted"
+REASON_NOTE_ARTICLE_MISMATCH = "analysis: learning note article mismatch"
 REASON_NOTE_SAVE_FAILED = "persistence: learning note save failed"
 REASON_MISSING_NOTE = "persistence: analyzed article missing learning note"
 REASON_ARTICLE_UPDATE_FAILED = "persistence: article update failed"
@@ -458,11 +460,32 @@ class ProcessNewsFeedService:
         if existing is None:
             return self._insert_and_process(candidate, retry_failed=retry_failed)
 
-        if by_url is None and candidate.url != existing.url:
-            # The (source, external_id) identity matched but the feed now
-            # reports a different URL. The URL lookup above already confirmed
-            # no other Article owns the candidate URL; refresh it durably
-            # before any extraction or analysis uses a known-stale URL.
+        return self._prepare_existing_candidate(
+            existing,
+            candidate,
+            matched_by_current_url=by_url is not None,
+            retry_failed=retry_failed,
+        )
+
+    def _prepare_existing_candidate(
+        self,
+        existing: Article,
+        candidate: ArticleCandidate,
+        *,
+        matched_by_current_url: bool,
+        retry_failed: bool,
+    ) -> ArticleProcessingResult:
+        """Refresh a changed candidate URL if needed, then run the pipeline core.
+
+        Shared by the ordinary identity path and insert-race recovery so both
+        apply the changed-URL rule identically. When the current candidate URL
+        did not match the resolved Article (only `(source, external_id)`
+        matched) and the URL differs, the candidate URL - already confirmed
+        unowned by the caller's URL lookup - is refreshed and persisted before
+        any extraction, so a known-stale URL is never used. An update-time
+        `DuplicateArticleError` becomes an identity conflict.
+        """
+        if not matched_by_current_url and candidate.url != existing.url:
             refreshed_or_failure = self._refresh_url(existing, candidate)
             if isinstance(refreshed_or_failure, FailureDetail):
                 return ArticleProcessingResult(
@@ -546,7 +569,15 @@ class ProcessNewsFeedService:
                     message=REASON_IDENTITY_CONFLICT,
                 ),
             )
-        return self._load_and_process(existing, retry_failed=retry_failed)
+        # Same changed-URL rule as the ordinary path: if the duplicate insert
+        # arose from a (source, external_id) collision and the URL changed,
+        # refresh it before processing rather than extracting from the stale URL.
+        return self._prepare_existing_candidate(
+            existing,
+            candidate,
+            matched_by_current_url=by_url is not None,
+            retry_failed=retry_failed,
+        )
 
     def _refresh_url(
         self, existing: Article, candidate: ArticleCandidate
@@ -816,6 +847,33 @@ class ProcessNewsFeedService:
         logger.info("extraction started article_id=%s", article.id)
         result = self._extractor.extract(article.url)
 
+        if result.url != article.url:
+            # Integrity guard: the extractor returned a result for a different
+            # URL than requested. Treat it as an extraction failure - never
+            # persist its text or analyze it - without logging either raw URL.
+            logger.error(
+                "extraction result url mismatch article_id=%s", article.id
+            )
+            failed = reconstruct_article(
+                article,
+                processing_status=ProcessingStatus.FAILED,
+                failure_reason=REASON_EXTRACTION_URL_MISMATCH,
+            )
+            try:
+                self._articles.update(failed)
+            except RepositoryError as exc:
+                logger.error(
+                    "url-mismatch failure state update failed article_id=%s error_type=%s",
+                    article.id,
+                    type(exc).__name__,
+                )
+            return self._article_failure(
+                article,
+                stage=PipelineStage.EXTRACTION,
+                category="result_url_mismatch",
+                message=REASON_EXTRACTION_URL_MISMATCH,
+            )
+
         if result.status is ExtractionStatus.SUCCESS:
             updated = reconstruct_article(
                 article,
@@ -905,6 +963,21 @@ class ProcessNewsFeedService:
                 pending,
                 reason=REASON_ANALYSIS_VALIDATION,
                 category="validation_exhausted",
+                created=created,
+                extracted=extracted,
+            )
+
+        if note.article_id != pending.id:
+            # Integrity guard: the generated note claims a different Article.
+            # Never persist it against any Article; fail the current one
+            # (retaining its accepted raw_text) without exposing the wrong id.
+            logger.error(
+                "learning note article mismatch article_id=%s", pending.id
+            )
+            return self._fail_analysis(
+                pending,
+                reason=REASON_NOTE_ARTICLE_MISMATCH,
+                category="result_identity_mismatch",
                 created=created,
                 extracted=extracted,
             )

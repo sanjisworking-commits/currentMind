@@ -170,6 +170,32 @@ def test_process_feed_discovery_failure_exit_one(
     assert "Feed discovery failed" in captured.err
 
 
+def test_process_feed_discovery_error_is_privacy_safe(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    secret = "UNMISTAKABLE-SECRET-MARKER"
+    raw = (
+        f"RSS feed at https://feed.invalid/upsc/feed/?token={secret} failed: "
+        f"connection reset with raw provider text {secret}"
+    )
+
+    class _FailingService:
+        def process(self, *, retry_failed: bool = False) -> ProcessingSummary:
+            raise ArticleSourceError(raw)
+
+    monkeypatch.setattr(cli, "_compose_service", lambda settings: _FailingService())
+
+    exit_code = cli.main(["process-feed"])
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Feed discovery failed" in captured.err
+    assert secret not in captured.out
+    assert secret not in captured.err
+    assert "token=" not in captured.err
+    assert "https://feed.invalid" not in captured.err
+
+
 # --- retry-article -----------------------------------------------------------------
 
 
