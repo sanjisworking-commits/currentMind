@@ -204,6 +204,7 @@ class TrafilaturaArticleExtractor:
                 include_links=False,
                 include_images=False,
             )
+            cleaned = _clean_text(raw_text) if raw_text else ""
         except Exception as exc:
             logger.error("Unexpected extraction failure url=%s", validated_url, exc_info=True)
             return ExtractedArticle(
@@ -211,8 +212,6 @@ class TrafilaturaArticleExtractor:
                 status=ExtractionStatus.UNEXPECTED_ERROR,
                 error_reason=f"Unexpected extraction failure: {type(exc).__name__}",
             )
-
-        cleaned = _clean_text(raw_text) if raw_text else ""
 
         if not cleaned:
             logger.warning("Insufficient extracted content url=%s chars=0", validated_url)
@@ -255,7 +254,9 @@ class TrafilaturaArticleExtractor:
         Raises:
             httpx.TimeoutException: on request timeout.
             httpx.HTTPError: on connection or other transport failure.
-            _HttpStatusFailure: if the response status code is >= 400.
+            _HttpStatusFailure: if the final response status code is outside
+                the 200-299 range (including a non-followable 3xx, such as a
+                redirect with no Location header, or a 304).
             _ResponseTooLarge: if the declared or streamed body size exceeds
                 `max_response_bytes`.
         """
@@ -267,7 +268,7 @@ class TrafilaturaArticleExtractor:
             headers=headers,
         ) as client:
             with client.stream("GET", url) as response:
-                if response.status_code >= 400:
+                if not 200 <= response.status_code < 300:
                     raise _HttpStatusFailure(response.status_code)
 
                 content_length = response.headers.get("content-length")

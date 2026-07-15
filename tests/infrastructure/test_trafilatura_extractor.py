@@ -7,6 +7,7 @@ import pytest
 import trafilatura
 
 from app.domain.extraction import ExtractionStatus
+from app.infrastructure import trafilatura_extractor as extractor_module
 from app.infrastructure.trafilatura_extractor import (
     DEFAULT_MIN_CONTENT_LENGTH,
     USER_AGENT,
@@ -350,6 +351,27 @@ def test_unexpected_trafilatura_exception_is_unexpected_error(
     assert any(record.exc_info for record in caplog.records)
 
 
+def test_unexpected_cleanup_exception_is_unexpected_error(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(trafilatura, "extract", lambda *a, **k: "valid extracted text")
+
+    def boom_clean_text(text: str) -> str:
+        raise RuntimeError("cleanup boom")
+
+    monkeypatch.setattr(extractor_module, "_clean_text", boom_clean_text)
+    caplog.set_level(logging.ERROR, logger="app.infrastructure.trafilatura_extractor")
+    extractor = _extractor(_transport_returning("indian_express_article.html"))
+
+    result = extractor.extract(ARTICLE_URL)
+
+    assert result.status == ExtractionStatus.UNEXPECTED_ERROR
+    assert result.error_reason is not None
+    assert "RuntimeError" in result.error_reason
+    assert "Unexpected extraction failure" in caplog.text
+    assert any(record.exc_info for record in caplog.records)
+
+
 # --- Network and HTTP status mapping -------------------------------------------
 
 
@@ -400,6 +422,46 @@ def test_permanent_4xx_status_codes_map_to_unsupported_page(status_code: int) ->
     assert result.status == ExtractionStatus.UNSUPPORTED_PAGE
     assert result.error_reason is not None
     assert str(status_code) in result.error_reason
+
+
+def test_non_followable_redirect_without_location_is_unsupported_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*args: Any, **kwargs: Any) -> str | None:
+        raise AssertionError("Trafilatura must not be invoked for a non-2xx final response")
+
+    monkeypatch.setattr(trafilatura, "extract", fail_if_called)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, content=b"")
+
+    extractor = _extractor(httpx.MockTransport(handler))
+
+    result = extractor.extract(ARTICLE_URL)
+
+    assert result.status == ExtractionStatus.UNSUPPORTED_PAGE
+    assert result.error_reason is not None
+    assert "302" in result.error_reason
+
+
+def test_304_not_modified_final_response_is_unsupported_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_if_called(*args: Any, **kwargs: Any) -> str | None:
+        raise AssertionError("Trafilatura must not be invoked for a non-2xx final response")
+
+    monkeypatch.setattr(trafilatura, "extract", fail_if_called)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(304, content=b"")
+
+    extractor = _extractor(httpx.MockTransport(handler))
+
+    result = extractor.extract(ARTICLE_URL)
+
+    assert result.status == ExtractionStatus.UNSUPPORTED_PAGE
+    assert result.error_reason is not None
+    assert "304" in result.error_reason
 
 
 # --- Redirects ------------------------------------------------------------------
