@@ -24,7 +24,7 @@ valid domain objects:
 import sqlite3
 
 import pytest
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.application.repositories import ArticleRepository, RepositoryError
 from app.infrastructure.database import create_engine_from_url, create_session_factory
@@ -71,6 +71,46 @@ def test_locked_database_raises_repository_error(migrated_db_url: str) -> None:
             repository.add(make_article())
     finally:
         locker.close()
+
+
+def test_generic_locked_database_error_redacts_article_parameters(
+    migrated_db_url: str,
+) -> None:
+    """A locked-database `OperationalError` goes through the generic
+    `SQLAlchemyError` fallback branch, not the duplicate translator (which
+    builds its own message and never interpolates the SQLAlchemy exception at
+    all). This test proves specifically that `hide_parameters=True` on the
+    engine - not the translator's own message construction - is what keeps
+    bound `Article` content out of the resulting `RepositoryError`, by
+    asserting the sensitive text is absent even from the chained SQLAlchemy
+    cause's own string representation.
+    """
+    sensitive_text = "UNMISTAKABLE-SENSITIVE-ARTICLE-BODY-" + "X" * 200
+    article = make_article(raw_text=sensitive_text)
+
+    db_path = migrated_db_url.removeprefix("sqlite:///")
+    locker = sqlite3.connect(db_path)
+    locker.execute("BEGIN EXCLUSIVE")
+    engine = create_engine_from_url(f"{migrated_db_url}?timeout=0")
+    try:
+        repository = SQLiteArticleRepository(create_session_factory(engine))
+        with pytest.raises(RepositoryError) as excinfo:
+            repository.add(article)
+    finally:
+        locker.close()
+        engine.dispose()
+
+    error = excinfo.value
+    assert type(error) is RepositoryError
+    assert sensitive_text not in str(error)
+    assert sensitive_text not in repr(error)
+    # a chained SQLAlchemy cause exists (exception chaining preserved: `raise
+    # ... from exc`), and the sensitive text is absent even from *its* own
+    # string representation - proving `hide_parameters=True` is doing the
+    # redaction, not just the outer RepositoryError's message wording.
+    assert error.__cause__ is not None
+    assert isinstance(error.__cause__, SQLAlchemyError)
+    assert sensitive_text not in str(error.__cause__)
 
 
 def test_duplicate_error_message_does_not_include_article_body(
