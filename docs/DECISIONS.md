@@ -1536,6 +1536,204 @@ which Sprint 4 explicitly does not have.
 
 ---
 
+## ADR-022: Structured Learning Note Generation through OpenAI Responses
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Sprint 5 introduces the first LLM-backed component: transforming an
+`Article`'s extracted text into a validated `LearningNote`, following the
+same "port in the application layer, concrete adapter in infrastructure"
+pattern ADR-019/020/021 already established for `ArticleSource`,
+`ArticleExtractor`, and the persistence repositories. Two questions were
+specific to this sprint and needed settling before writing code: how to stop
+LLM output from ever controlling trusted identity/provenance metadata, and
+how to use the OpenAI Python SDK correctly given it had moved to a new major
+version (2.x) since before this project's dependencies were last reviewed.
+
+### Decision
+
+* **`LearningNoteGenerator`** (a `Protocol` with `generate(self, article:
+  Article) -> LearningNote`) lives in `app/application/learning_notes.py`,
+  the same placement pattern as every prior port. `article.raw_text is
+  None`, blank, or whitespace-only raises `ValueError` before any prompt
+  rendering or provider request - a caller contract violation, not an
+  operational outcome, mirroring ADR-020's treatment of an invalid `url`.
+  The generator does not validate `article.processing_status`; deciding
+  when an `Article` is ready for analysis is a future orchestration
+  concern.
+* **`LearningNoteContent`**, added beside `LearningNote` in
+  `app/domain/learning_note.py`, contains exactly the 15 AI-authored fields
+  with **no defaults** - OpenAI Structured Outputs requires every field
+  present in every response, so an irrelevant category must be returned as
+  an explicit empty list by the model, never omitted and backfilled
+  locally. It has no `id`, `article_id`, `model_name`, `prompt_version`, or
+  `created_at` fields, so the model cannot influence trusted metadata by
+  construction, not convention. It is a sibling of `LearningNote`, not a
+  superclass or subclass - touching the already-shipped, Sprint-4-migrated
+  `LearningNote` for a DRY-only refactor was rejected as unjustified scope
+  creep. A parity test (`tests/domain/test_learning_note.py`) asserts
+  `LearningNoteContent`'s field set exactly equals `LearningNote`'s fields
+  minus trusted metadata, so the two cannot silently drift.
+* **`assemble_learning_note()`**, a pure function in
+  `app/application/learning_notes.py`, builds the final `LearningNote` using
+  explicit, individually named keyword arguments for every field - never a
+  `**dict` spread of validated content - so there is no path through which
+  a future content field could accidentally collide with or override a
+  trusted one. `id` and `created_at` use `LearningNote`'s own domain
+  defaults unless `created_at` is explicitly injected for deterministic
+  tests.
+* **OpenAI is the sole Phase 1 provider** (extending ADR-008's precedent of
+  naming one Phase 1 library rather than building a multi-provider
+  abstraction), accessed exclusively through the **Responses API**'s native
+  structured-output parsing: `client.responses.parse(model=..., input=...,
+  text_format=LearningNoteContent)`, reading `response.output_parsed`.
+  There is no Chat Completions fallback, no manual JSON parsing, no
+  Markdown-fence stripping, no regex extraction. Pydantic (via the SDK's
+  own use of `model_validate_json` inside `.parse()`) remains the sole
+  validator.
+* **Before writing any response-handling code, the installed `openai==2.45.0`
+  package's own source was read directly** (`OpenAI.__init__`,
+  `Responses.parse`, `ParsedResponse`, `Response.status`,
+  `IncompleteDetails`, `ResponseOutputRefusal`, the `_exceptions.py`
+  hierarchy) rather than relying on training-data memory or partially
+  blocked documentation fetches. This confirmed, among other things, that
+  `LengthFinishReasonError`/`ContentFilterFinishReasonError` belong only to
+  the older Chat Completions parsing path - the Responses API represents
+  incompleteness as data (`response.status == "incomplete"` +
+  `response.incomplete_details.reason`), not a raised exception - and that
+  a `pydantic.ValidationError` genuinely can propagate directly out of
+  `client.responses.parse()` itself (from `parse_text()`'s
+  `model_validate_json` call), which is the primary retry trigger.
+* **Exactly three total validation attempts** (one original, up to two
+  repair retries). Retried only for a `pydantic.ValidationError` raised
+  during parsing, or a completed, non-refusal response with no parsed
+  content. Never retried: invalid input (never reaches the loop), a typed
+  refusal, `status == "incomplete"` (`max_output_tokens` or
+  `content_filter`), or any `openai.OpenAIError` (transport, auth,
+  permission, rate limit, server error) - each becomes an immediate
+  `LearningNoteProviderError`. The OpenAI SDK's own transport-level retry
+  (`max_retries`, explicitly set to 2 at client construction, matching the
+  SDK default) operates entirely beneath and separately from this loop.
+  Repair instructions sent back to the model contain only sanitized
+  Pydantic error `type`/`loc`/`msg` fields (`errors(include_input=False)`)
+  - never the rejected value.
+* **Reusable client, narrow typed test seam.** The adapter owns a long-lived
+  `openai.OpenAI` client (a deliberate difference from the short-lived
+  `httpx.Client`-per-call pattern in `IndianExpressRSSSource`/
+  `TrafilaturaArticleExtractor`, justified because the OpenAI SDK's client
+  is explicitly designed as a reusable, connection-pooling object). The
+  only test seam is `_ResponsesClient`, an infrastructure-private
+  structural `Protocol` covering just the `.parse(model=..., input=...,
+  text_format=...)` surface this adapter calls - not a second
+  application-facing provider abstraction, and not a fake
+  `LearningNoteGenerator`. The constructor requires **exactly one** of
+  `api_key` or `responses`, raising `ValueError` for both or neither,
+  rather than defining an implicit precedence rule between them.
+* **External, version-derived prompt files.** `prompts/learning_note_v1_system.txt`
+  and `prompts/learning_note_v1_user.txt`, loaded and rendered with stdlib
+  `string.Template` (`$identifier` placeholders, `.substitute()` -
+  never `.safe_substitute()`). `PROMPT_VERSION = "v1"` is a single source of
+  truth: both filenames are derived from it, so bumping the version without
+  adding the corresponding files fails immediately with a clear
+  `FileNotFoundError` rather than silently reusing a stale prompt.
+  `load_prompt_template()` validates a template's exact placeholder set
+  before any provider request - an unknown or missing placeholder, an empty
+  file, or a missing file all fail loudly.
+* **No persistence or pipeline wiring.** `generate()` returns a
+  `LearningNote`; nothing calls `LearningNoteRepository`, nothing updates
+  `Article.processing_status`, and no application service connects
+  discovery, extraction, or persistence to analysis. That is explicitly a
+  future orchestration sprint's responsibility.
+
+### Alternatives Considered
+
+1. Letting the LLM populate the complete persisted `LearningNote` schema
+   directly, including `id`/`article_id`/`model_name`/`prompt_version`/
+   `created_at` (rejected - lets untrusted model output determine identity
+   and provenance metadata).
+2. `LearningNote(LearningNoteContent)` inheritance to eliminate duplicated
+   field-validator registrations (rejected - no concrete correctness defect
+   justifies touching the already-shipped `LearningNote`; the sibling model
+   plus explicit-keyword assembly already prevents both duplication of
+   validation logic, since both models call the same shared
+   `app.domain.validation` helpers, and conversion errors).
+3. Chat Completions `.parse()` as the primary or fallback API (rejected per
+   explicit instruction - Responses API only, to avoid maintaining two
+   response-handling code paths for one provider).
+4. A broad `client: OpenAI | None` constructor parameter with monkeypatched
+   internals for testing (rejected - untyped, encourages patching SDK
+   internals, and does not compose with strict MyPy as cleanly as a narrow
+   Protocol).
+5. Ambiguous constructor precedence between `api_key` and an injected client
+   (rejected in favor of requiring exactly one, which is simpler to reason
+   about and test than a precedence rule).
+
+### Rationale
+
+Keeping the port in `app/application/` and the adapter in
+`app/infrastructure/` extends a pattern proven three times already. Splitting
+AI-authored content from trusted metadata into two types - rather than
+trusting the model with the full schema and stripping fields afterward -
+makes the "the model cannot control identity/provenance" guarantee a
+property of the type system, not application logic that could be forgotten
+or bypassed. Reading the installed SDK's own source before writing adapter
+code (rather than trusting training-data memory of an older `openai`
+version) directly followed from the explicit instruction not to rely on
+remembered or obsolete APIs, and surfaced real, non-obvious behavior (the
+Chat-Completions-only scope of `LengthFinishReasonError`, and that Pydantic
+validation failures can propagate directly out of `.parse()`) that a
+memory-only implementation would have gotten wrong.
+
+### Consequences
+
+#### Positive
+
+* A future orchestration service depends only on
+  `app.application.learning_notes`, never on the `openai` package directly.
+* `LearningNoteContent`'s all-required-no-defaults shape is enforced at both
+  the Pydantic layer and, by the parity test, kept from silently drifting
+  from `LearningNote`.
+* The three-attempt validation retry is bounded, stateless, and cleanly
+  separated from the SDK's own transport retry - no risk of the two
+  compounding into an unbounded retry storm.
+* Every adapter test runs against a handwritten fake with no network
+  access, and exercises the real retry/assembly/error-translation logic
+  rather than a mocked generator.
+
+#### Negative
+
+* The narrow `_ResponsesClient` Protocol required a targeted, documented
+  `cast()` where the real `Responses.parse` method's enormous
+  auto-generated signature (dozens of `Omit`-defaulted parameters, huge
+  Literal-union types) doesn't structurally match a hand-written narrow
+  Protocol under strict MyPy, even though the actual keyword arguments used
+  are valid at runtime - confirmed by direct source inspection, not
+  assumed.
+* No truncation policy exists for very long extracted article text; an
+  abnormally long or mis-extracted article could be rejected by the
+  provider for exceeding context length. This is handled safely (a normal
+  `LearningNoteProviderError`, not a crash) but is a documented, accepted
+  risk rather than a solved problem.
+* Long-lived client ownership is a deliberate deviation from the
+  short-lived-per-call pattern in the Sprint 2/3 adapters; a future
+  reader must understand this is intentional, not an inconsistency.
+
+### Revisit When
+
+Revisit the no-truncation decision if real usage shows articles routinely
+exceeding the configured model's context window. Revisit the
+Responses-API-only decision if a concrete requirement emerges for a second
+provider or for Chat-Completions-specific behavior. Revisit
+`_ResponsesClient`'s narrow surface if a future sprint needs additional
+Responses API parameters (for example `previous_response_id` for
+multi-turn use) that the current Protocol does not expose.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -1561,6 +1759,7 @@ which Sprint 4 explicitly does not have.
 | ADR-019 | Synchronous application-layer `ArticleSource` port        | Accepted |
 | ADR-020 | Synchronous `ArticleExtractor` port with status-based outcomes | Accepted |
 | ADR-021 | SQLite persistence via application repository ports and explicit domain/ORM mapping | Accepted |
+| ADR-022 | Structured Learning Note generation through OpenAI Responses | Accepted |
 
 ---
 

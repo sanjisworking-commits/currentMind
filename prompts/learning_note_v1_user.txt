@@ -1,0 +1,10 @@
+Analyze the following UPSC current-affairs article and produce a Learning Note matching the required structured schema exactly.
+
+$article_metadata
+
+Any URL shown above is provided for context and identification only. Do not attempt to fetch, browse, or verify it.
+
+--- BEGIN ARTICLE CONTENT ---
+$article_text
+--- END ARTICLE CONTENT ---
+$repair_instruction
