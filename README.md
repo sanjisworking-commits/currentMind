@@ -10,13 +10,13 @@ and `docs/ROADMAP.md` for the full product and engineering plan.
 
 ## Current Status
 
-**Sprint 2 — Source Adapter and RSS Discovery.** Sprint 0 provides the
-application skeleton, configuration, logging, and health-check endpoint.
-Sprint 1 adds the core domain layer (`app/domain/`): `ArticleCandidate`,
-`Article`, `ExtractedArticle`, `LearningNote`, `PrelimsQuestion`,
-`MainsQuestion`, and the `ProcessingStatus`, `ExtractionStatus`, and `GSPaper`
-enums — all validated Pydantic models with no dependency on FastAPI,
-SQLAlchemy, feedparser, Trafilatura, or the OpenAI SDK.
+**Sprint 3 — Article Content Extraction.** Sprint 0 provides the application
+skeleton, configuration, logging, and health-check endpoint. Sprint 1 adds
+the core domain layer (`app/domain/`): `ArticleCandidate`, `Article`,
+`ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`, and
+the `ProcessingStatus`, `ExtractionStatus`, and `GSPaper` enums — all
+validated Pydantic models with no dependency on FastAPI, SQLAlchemy,
+feedparser, Trafilatura, or the OpenAI SDK.
 
 Sprint 2 adds RSS discovery:
 
@@ -50,8 +50,53 @@ Key behaviour:
   `ArticleSourceError`, so a broken feed can never look identical to a
   legitimate empty one.
 
-There is no application service wiring the adapter into a pipeline yet, no
-persistence, no article extraction, and no dashboard.
+Sprint 3 adds article content extraction:
+
+* `app/application/extraction.py` — the `ArticleExtractor` port
+  (`extract(url: str) -> ExtractedArticle`), which application code depends
+  on instead of any concrete extraction library.
+* `app/infrastructure/trafilatura_extractor.py` — `TrafilaturaArticleExtractor`,
+  which downloads a page with `httpx` and extracts clean article text with
+  Trafilatura 2.x.
+
+Key behaviour:
+
+* An invalid `url` (blank, relative, non-http(s), or missing a network
+  location) raises `ValueError` before any HTTP request is made — invalid
+  input is a caller contract violation, not an operational outcome, because
+  `ExtractedArticle.url` only accepts valid absolute HTTP/HTTPS URLs.
+* Once a valid URL is accepted, every outcome — success, insufficient
+  content, network failure, unsupported page, or an unexpected failure — is
+  returned as an `ExtractedArticle`; no expected operational failure raises
+  an exception.
+* A short-lived `httpx.Client` is created and closed inside every
+  `extract()` call, the same pattern as `IndianExpressRSSSource`; the
+  constructor accepts only an optional `httpx.BaseTransport` test seam.
+* The response body is streamed via `response.iter_bytes()` and capped at
+  `max_response_bytes` (default 10 MB): a `Content-Length` header over the
+  limit is rejected early as a hint, but the streamed byte count is what
+  actually enforces the cap, so a missing or understated header cannot
+  bypass it.
+* HTTP `408`, `429`, and `5xx`, plus timeouts and connection failures, map to
+  `NETWORK_ERROR` (transient). Other `4xx` codes, unsupported content types,
+  and oversized responses map to `UNSUPPORTED_PAGE` (permanent). The status
+  code is always included in `error_reason`.
+* Only `text/html` and `application/xhtml+xml` are accepted. A missing
+  `Content-Type` is tentatively processed unless the body starts with a
+  known binary signature (PDF, PNG, JPEG, GIF); any other explicit content
+  type is rejected before Trafilatura ever runs.
+* Trafilatura is called with `output_format="txt"`,
+  `include_comments=False`, `include_links=False`, `include_images=False`,
+  and default `include_tables`/`favor_precision`/`favor_recall` — the
+  balanced default extraction mode. The raw downloaded bytes are passed
+  directly to Trafilatura (no separate decode step); only whitespace
+  normalization is applied locally afterward.
+* Extracted text below `min_content_length` (default 200 characters) is
+  `INSUFFICIENT_CONTENT`, retaining whatever partial text Trafilatura
+  returned; `SUCCESS` requires `len(cleaned_text) >= min_content_length`.
+
+There is no application service wiring RSS discovery to extraction yet, no
+persistence, no LLM analysis, and no dashboard.
 
 ## Requirements
 
@@ -133,15 +178,27 @@ uv run mypy .
 
 ## Known Limitations
 
-* `IndianExpressRSSSource` can discover article candidates from the feed, but
-  nothing yet calls it: there is no application service, CLI command, or
-  scheduler wiring RSS discovery into a pipeline. Article extraction,
-  persistence, LLM analysis, and the dashboard do not exist yet.
+* `IndianExpressRSSSource` can discover article candidates and
+  `TrafilaturaArticleExtractor` can extract clean text from a URL, but
+  nothing yet connects them: there is no application service, CLI command,
+  or scheduler wiring discovery into extraction into a pipeline. Persistence,
+  LLM analysis, and the dashboard do not exist yet.
 * RSS request timeout and the User-Agent string are fixed module constants in
   `app/infrastructure/rss_source.py`, not environment-configurable, since
-  Sprint 2 has no concrete need for that yet.
+  Sprint 2 has no concrete need for that yet. `TrafilaturaArticleExtractor`
+  follows the same pattern for its own timeout, User-Agent,
+  `min_content_length`, and `max_response_bytes`.
 * Deduplication is within a single fetched response only; there is no
   persistence-backed or cross-run duplicate detection yet (planned for
   Sprint 4).
+* `TrafilaturaArticleExtractor` performs no DNS resolution or IP-range
+  filtering (no localhost/private-address/redirect-target protection). This
+  is intentional for Sprint 3: `extract(url)` is only ever called by internal
+  application workflows on URLs already validated as absolute HTTP/HTTPS, and
+  Phase 1 has no public URL-submission endpoint or other untrusted input path
+  to this method. This must be revisited before adding any manual
+  article-submission API, public endpoint, or other untrusted URL input.
+* Full PDF, image, and OCR extraction are out of scope; such content types
+  are rejected as `UNSUPPORTED_PAGE` before Trafilatura runs.
 * No database exists yet; `database/` and `logs/` are present as placeholders
   for later sprints.

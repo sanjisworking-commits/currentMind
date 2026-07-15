@@ -1195,6 +1195,138 @@ Reconsider synchronous execution only when a real concurrency requirement appear
 
 ---
 
+## ADR-020: Synchronous ArticleExtractor Port with Status-Based Outcomes
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Sprint 3 introduces the first article-extraction adapter
+(`TrafilaturaArticleExtractor`) and needs a stable contract that a future
+application workflow can depend on instead of the concrete Trafilatura
+implementation. This mirrors the situation ADR-019 already settled for
+`ArticleSource`, but with one important difference: `ExtractedArticle`
+(defined in Sprint 1) is a validated domain model whose `url` field only
+accepts a valid absolute HTTP/HTTPS URL, so an invalid `url` argument cannot
+be represented as an `ExtractedArticle` value at all. This forced an
+explicit decision about which failures belong in the domain result and
+which belong in the caller contract, in addition to the layer-placement and
+sync-vs-async questions ADR-019 already answered the same way.
+
+### Decision
+
+* `ArticleExtractor` (a `Protocol` with `extract(self, url: str) ->
+  ExtractedArticle`) lives in `app/application/extraction.py`, following the
+  same application-layer placement as `ArticleSource` (ADR-019) and for the
+  same reason: it expresses a workflow-level contract, not a domain concept.
+  No application exception type is defined alongside it.
+* `extract()` is synchronous, for the same reasons ADR-019 gives for
+  `discover_articles()`: one blocking `httpx` call per article, Trafilatura's
+  API is synchronous, and there is no current concurrency requirement.
+* `app/infrastructure/trafilatura_extractor.py` implements the port
+  structurally (`TrafilaturaArticleExtractor` does not inherit from
+  `ArticleExtractor`), using Trafilatura 2.x as the extraction library behind
+  it — Trafilatura itself was already selected in ADR-008; this decision
+  does not revisit that choice, only how the library is wrapped.
+* **Invalid URLs raise `ValueError` and make no HTTP request**, unlike
+  `ArticleSourceError` for RSS discovery failures. An invalid `url` argument
+  is treated as a caller contract violation (the type signature already says
+  `url: str`, and Sprint 3 requires it to additionally be a non-blank,
+  absolute http(s) URL with a network location) rather than an operational
+  outcome, because `ExtractedArticle.url` cannot hold an invalid value — the
+  domain model was deliberately not modified to accommodate one.
+* **Every outcome after a valid URL is accepted is returned as an
+  `ExtractedArticle`**, never raised. This includes an unexpected failure
+  inside Trafilatura or the post-processing step, mapped to
+  `ExtractionStatus.UNEXPECTED_ERROR` with the traceback logged
+  (`exc_info=True`) but a concise, non-sensitive `error_reason` returned to
+  the caller. This is the opposite choice from ADR-019, which raises
+  `ArticleSourceError` for RSS failures — the two adapters differ because
+  `ArticleSource.discover_articles()` returns a `list[ArticleCandidate]`
+  with no per-item failure channel, while `ExtractedArticle.status` already
+  exists specifically to carry a per-article outcome. Routing extraction
+  failures through it (rather than a parallel exception type) means a future
+  batch orchestrator (Sprint 6) can handle every extraction outcome,
+  expected or not, the same way: inspect `status`, log, and continue to the
+  next article, with no per-article `try/except` required.
+* Phase 1 has no public or untrusted URL-submission entry point.
+  `extract(url)` is only ever called by internal application workflows on
+  URLs that already passed `ArticleCandidate`/`Article` validation upstream.
+  Accordingly, Sprint 3 does not add DNS resolution, IP-range filtering, or
+  redirect-target validation — see the Consequences section.
+
+### Alternatives Considered
+
+1. Represent an invalid URL as `ExtractedArticle(status=UNSUPPORTED_PAGE,
+   ...)` (rejected — `ExtractedArticle.url` is validated by
+   `validate_http_url` and cannot hold a blank, relative, or non-http(s)
+   value; constructing the result would itself fail domain validation).
+2. Loosen `ExtractedArticle.url` to accept arbitrary strings so invalid URLs
+   could be represented as a status (rejected — this dilutes a Sprint 1
+   domain invariant for a Sprint 3 convenience, and CLAUDE.md directs that
+   domain models are not modified merely to accommodate a new adapter).
+3. Define an `ArticleExtractionError` application exception, paralleling
+   `ArticleSourceError`, for all extraction failures including expected
+   operational ones (rejected — `ExtractedArticle.status` already exists to
+   carry exactly this information; a parallel exception type would give
+   callers two failure channels to handle for the same class of outcome).
+4. Add SSRF hardening (DNS/IP-range/redirect-target checks) now, ahead of
+   any untrusted URL input path (rejected as premature for Phase 1 — see
+   Consequences; to be revisited when a concrete untrusted-input trigger
+   appears).
+
+### Rationale
+
+Keeping the port in the application layer and decoupled from Trafilatura
+lets a future `ProcessNewsFeedService` (Sprint 6) depend only on
+`app.application.extraction`, matching the pattern ADR-019 already
+established for `ArticleSource`. Raising `ValueError` for invalid URLs
+(rather than stretching the domain model or inventing a new exception type)
+keeps the boundary honest: a malformed argument is a programming error at
+the call site, not something that happened while extracting a page, and
+CLAUDE.md's domain-modeling rules do not permit relaxing an existing
+validated field to accommodate it. Routing every outcome after a valid URL
+through `ExtractedArticle.status` — including genuinely unexpected failures
+— satisfies CLAUDE.md §13's requirement that "one failed article must not
+stop the entire batch": a future batch caller never needs a
+`try/except ArticleExtractionError` around each `extract()` call.
+
+### Consequences
+
+#### Positive
+
+* Application code and tests can depend on `app.application.extraction`
+  alone, never on `app.infrastructure.trafilatura_extractor`.
+* A single, uniform per-article handling pattern (`status` inspection) will
+  work for Sprint 6's batch orchestration regardless of failure cause.
+* The domain model's existing invariants (Sprint 1) remain untouched and
+  fully enforced; Sprint 3 adapts to them rather than the reverse.
+
+#### Negative
+
+* A caller that passes an unvalidated URL straight through to `extract()`
+  must be prepared to catch `ValueError`, unlike the fully status-based
+  RSS-discovery path — this asymmetry between the two ports must be
+  understood by whoever writes Sprint 6's orchestration code.
+* No loopback/private-address/redirect-target protection exists yet. This is
+  safe only because Phase 1 has no public URL-submission endpoint and no
+  other untrusted-input path to `extract()`; it must be revisited before any
+  future manual article-submission API, public endpoint, or other feature
+  that accepts a URL from an untrusted source.
+
+### Revisit When
+
+Reconsider the exception-vs-status split if a future sprint finds a
+genuinely operational failure mode that doesn't fit `ExtractionStatus`.
+Reconsider the absence of SSRF hardening the moment any untrusted or
+public-facing URL input path is introduced (per CLAUDE.md §23, no such path
+exists in Phase 1: no authentication, no multi-user input, no manual
+article submission).
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -1218,6 +1350,7 @@ Reconsider synchronous execution only when a real concurrency requirement appear
 | ADR-017 | Pydantic domain models with UUID identities and UTC times | Accepted |
 | ADR-018 | Closed `GSPaper` enum and four-option `PrelimsQuestion`   | Accepted |
 | ADR-019 | Synchronous application-layer `ArticleSource` port        | Accepted |
+| ADR-020 | Synchronous `ArticleExtractor` port with status-based outcomes | Accepted |
 
 ---
 
