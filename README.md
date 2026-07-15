@@ -10,7 +10,7 @@ and `docs/ROADMAP.md` for the full product and engineering plan.
 
 ## Current Status
 
-**Sprint 5 — LLM Analysis Contract and Prompt.** Sprint 0 provides the application
+**Sprint 6 — Processing Pipeline.** Sprint 0 provides the application
 skeleton, configuration, logging, and health-check endpoint. Sprint 1 adds
 the core domain layer (`app/domain/`): `ArticleCandidate`, `Article`,
 `ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`, and
@@ -223,8 +223,45 @@ Key behaviour:
   `str(exc)` rendering, which by Pydantic v2 default embeds the offending
   input.
 
-There is no application service wiring RSS discovery to extraction to
-persistence to analysis yet, and no dashboard.
+Sprint 6 connects everything into one processing pipeline:
+
+* `app/application/processing.py` — `ProcessNewsFeedService`, the synchronous
+  application service wiring discovery → identity resolution → persistence →
+  extraction → analysis → Learning Note persistence, plus the
+  `ProcessingSummary`/`FailureDetail`/`ArticleProcessingResult` result types,
+  the `reconstruct_article()` state-transition helper, and
+  `new_article_from_candidate()`.
+* `app/cli.py` — the stdlib-`argparse` command-line entry point and
+  composition root (see "Processing the Feed" below).
+
+Key behaviour:
+
+* **Idempotent reruns.** Resumption is decided from ground truth - whether a
+  Learning Note exists and whether accepted non-blank `raw_text` exists -
+  never by trusting a possibly stale `processing_status` or parsing
+  `failure_reason` text. Completed Articles are skipped; incomplete ones
+  resume at exactly the stage they need; an existing note reconciles a stale
+  status to `analyzed` without calling the generator.
+* **Note-first finalization.** The Learning Note is always persisted before
+  the Article is marked `analyzed`, so `analyzed` can never durably exist
+  without its note. If finalization fails after the note is saved, the
+  Article deliberately rests at its last durable checkpoint and the next run
+  reconciles it - the intended no-Unit-of-Work recovery path (ADR-023).
+* **Two retry scopes.** `process-feed --retry-failed` retries failed
+  Articles rediscovered in the current feed window;
+  `retry-article <UUID>` retries any persisted Article directly, including
+  one that has dropped out of the feed, and never calls RSS discovery.
+* **Per-Article failure isolation.** One Article's failure - expected or a
+  genuine defect - never stops the batch. Failures surface as structured,
+  privacy-safe `FailureDetail`s (stage, fixed category, safe message,
+  query-stripped URL; never article text, prompts, or provider output).
+* **Summary counters are independent metrics** and intentionally overlap: a
+  fully successful new Article increments `new_articles`,
+  `successfully_extracted`, and `successfully_analyzed`. They are not a
+  partition of `total_discovered`; the one arithmetic invariant is
+  `failed == len(failure_details)`.
+
+There is no dashboard yet.
 
 ## Requirements
 
@@ -306,7 +343,38 @@ curl http://127.0.0.1:8000/health
 
 ## Processing the Feed
 
-Not yet implemented (planned for a later sprint).
+The database schema must exist first (`uv run alembic upgrade head` — the CLI
+never runs migrations automatically and fails with a clear message if the
+schema is missing). `OPENAI_API_KEY` and `LLM_MODEL` must be set.
+
+Process the current RSS feed window:
+
+```bash
+uv run python -m app.cli process-feed
+```
+
+Also retry failed articles that are rediscovered in the current feed:
+
+```bash
+uv run python -m app.cli process-feed --retry-failed
+```
+
+Retry one persisted article by UUID — including an article that no longer
+appears in the RSS feed (this command never calls feed discovery):
+
+```bash
+uv run python -m app.cli retry-article <ARTICLE_UUID>
+```
+
+The two retry paths differ deliberately: `--retry-failed` only reaches failed
+articles still present in the feed window, while `retry-article` operates
+purely on persisted state.
+
+Exit codes: `0` for a completed command with no article-level failures; `1`
+for a configuration failure, feed-discovery failure, unknown article id,
+database failure, or one or more article-level failures. The command prints
+summary counts and safe failure details (stage, category, message,
+identifiers) — never article text or provider output.
 
 ## Starting the Dashboard
 
@@ -327,21 +395,21 @@ uv run mypy .
 
 ## Known Limitations
 
-* `IndianExpressRSSSource` can discover article candidates,
-  `TrafilaturaArticleExtractor` can extract clean text from a URL, and
-  `SQLiteArticleRepository`/`SQLiteLearningNoteRepository` can persist and
-  retrieve them, but nothing yet connects these into a pipeline: there is no
-  application service, CLI command, or scheduler wiring discovery into
-  extraction into persistence. No LLM analysis and no dashboard exist yet.
+* There is no dashboard yet (planned for Sprint 7), and no automatic
+  scheduling or background processing — `process-feed` is run manually.
 * RSS request timeout and the User-Agent string are fixed module constants in
   `app/infrastructure/rss_source.py`, not environment-configurable, since
   Sprint 2 has no concrete need for that yet. `TrafilaturaArticleExtractor`
   follows the same pattern for its own timeout, User-Agent,
   `min_content_length`, and `max_response_bytes`.
-* Cross-run deduplication is now enforced by database unique constraints
-  (`uq_articles_url`, `uq_articles_source_external_id`), but nothing yet
-  calls `ArticleRepository` from RSS discovery — that wiring is planned for
-  Sprint 6.
+* `process-feed --retry-failed` reaches only failed articles that are still
+  present (rediscovered) in the current RSS feed window. A failed article
+  that has dropped out of the feed is retried with
+  `retry-article <ARTICLE_UUID>` instead — off-feed retry is supported, but
+  only through that explicit, targeted command.
+* Processing summary counters are independent, deliberately overlapping
+  operational metrics, not a partition of `total_discovered` (see the
+  Sprint 6 notes above and ADR-023).
 * `TrafilaturaArticleExtractor` performs no DNS resolution or IP-range
   filtering (no localhost/private-address/redirect-target protection). This
   is intentional for Sprint 3: `extract(url)` is only ever called by internal
@@ -356,27 +424,26 @@ uv run mypy .
   `extraction_error_reason` columns and no history of extraction attempts.
   Only the `Article` fields that already exist (`raw_text`,
   `processing_status`, `failure_reason`, `updated_at`) are persisted, via
-  `ArticleRepository.update()`. A future orchestration sprint decides how an
-  `ExtractedArticle` result changes an `Article`.
+  `ArticleRepository.update()`. Sprint 6's `ProcessNewsFeedService` decides
+  how an `ExtractedArticle` result changes an `Article`: only fully accepted
+  extraction text is ever written into `raw_text`; unusable partial text
+  from a failed extraction is discarded.
 * There is no cross-repository transaction atomicity between
   `ArticleRepository` and `LearningNoteRepository` calls (no Unit of Work);
-  each repository method commits its own transaction independently.
+  each repository method commits its own transaction independently. Sprint 6
+  compensates with deliberate write ordering (Learning Note before Article
+  finalization) plus note-existence reconciliation on the next run
+  (ADR-023), so interrupted sequences converge without regeneration.
 * The Alembic baseline revision (`migrations/versions/3318676bf824_*.py`) is
   hand-written to mirror `app/infrastructure/orm_models.py`, not
   autogenerated against a live database. Future schema changes should use
   `alembic revision --autogenerate` against a disposable database and then be
   reviewed by hand.
-* `OpenAILearningNoteGenerator` exists and is fully tested against a
-  handwritten fake, but nothing calls it: there is no processing pipeline,
-  no CLI command, and no application service wiring RSS discovery, article
-  extraction, or persistence into analysis. No automated test makes a live
-  OpenAI request, and Sprint 5 makes none either.
-* `Article`'s `processing_status`/`raw_text`/`failure_reason` are never
-  updated by generation - `LearningNoteGenerator.generate()` only reads
-  `article.raw_text` and returns a `LearningNote`; nothing persists the
-  result or marks the source `Article` as analyzed. That wiring, and the
-  decision of *when* an Article is ready for analysis, belongs to a future
-  orchestration sprint.
+* `LearningNoteGenerator.generate()` itself remains workflow-unaware: it
+  only reads `article.raw_text` and returns a `LearningNote`. All status
+  transitions and persistence around it are owned by
+  `ProcessNewsFeedService`. No automated test makes a live OpenAI request —
+  the pipeline and CLI tests all use fakes and temporary databases.
 * `OpenAILearningNoteGenerator` does not truncate long extracted article
   text. Real UPSC current-affairs articles are short-to-medium news pieces
   well within typical model context windows, and truncation risks silently

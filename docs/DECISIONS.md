@@ -1734,6 +1734,174 @@ multi-turn use) that the current Protocol does not expose.
 
 ---
 
+## ADR-023: Synchronous Idempotent Processing Pipeline with Ordered Persistence and Reconciliation
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Sprint 6 connects the existing, individually tested components - RSS
+discovery, article extraction, SQLite persistence, and Learning Note
+generation - into one complete workflow. The roadmap requires idempotent
+reruns, duplicate prevention, per-Article failure isolation, preserved
+partial progress, manual retry of failed Articles, a structured processing
+summary, and a local command-line entry point - all without background
+workers, scheduling, or new schema. The central design questions were: how
+resumption decisions are made for a previously seen Article, how cross-
+repository consistency is achieved without a Unit of Work (which ADR-021
+deliberately deferred), and how a failed Article that has dropped out of
+the RSS feed window can still be retried.
+
+### Decision
+
+* **One application service, ports only.** `ProcessNewsFeedService`
+  (`app/application/processing.py`) is constructor-injected with the five
+  existing ports (`ArticleSource`, `ArticleExtractor`, `ArticleRepository`,
+  `LearningNoteRepository`, `LearningNoteGenerator`) and imports no
+  infrastructure library. Execution is synchronous and strictly sequential;
+  all per-run state lives in local variables and immutable result objects,
+  never on the service instance.
+* **Two retry entry points with distinct scopes.**
+  `process(retry_failed=True)` retries FAILED Articles only when they are
+  rediscovered in the current feed window. `retry_article(article_id)` is
+  the targeted manual-retry operation for any persisted Article - it loads
+  state through `get_with_learning_note()`, never calls the source, and
+  raises `ArticleNotFoundError` for an unknown id. Both share the same
+  pipeline core; the workflow is never duplicated.
+* **Ground-truth resumption, not status trust.** What an Article needs is
+  decided from two facts that cannot go stale the way a status label can:
+  whether a Learning Note exists, and whether accepted non-blank `raw_text`
+  exists. An existing note reconciles the Article to `ANALYZED` without
+  invoking the generator (not gated by `retry_failed`); accepted text
+  resumes at analysis; its absence resumes at extraction. `failure_reason`
+  text is never parsed for control flow. `ANALYZED` with no note is an
+  invariant violation: reported as a failure and marked FAILED, never
+  silently auto-regenerated on first detection.
+* **Identity resolution across both dimensions.** Both the URL and the
+  `(source, external_id)` lookups run; agreement or a single match selects
+  the existing Article, disagreement is an identity conflict (recorded,
+  never merged/deleted/re-inserted), and a `DuplicateArticleError` insert
+  race is recovered by re-reading once - the database unique constraints
+  remain the final duplicate boundary per ADR-021.
+* **Changed-URL policy.** When `(source, external_id)` matches but the feed
+  reports a new URL (and the URL lookup confirmed no other Article owns
+  it), the existing Article's URL is refreshed through full Pydantic
+  reconstruction and persisted before any extraction or analysis, so a
+  known-stale URL is never silently used. A race-time
+  `DuplicateArticleError` on that update becomes an identity conflict.
+  Non-null conflicting external IDs are never overwritten.
+* **`raw_text` is the analysis-ready checkpoint.** Only fully accepted
+  extraction text is ever persisted into `Article.raw_text`; unusable
+  partial text from a failed extraction is discarded so that "non-blank
+  raw_text" reliably means "ready for analysis" during resumption. Failed
+  extractions preserve the Article row, metadata, and a fixed safe
+  `failure_reason` (`extraction: <category>`).
+* **Note-first finalization and the durable-success definition.** The write
+  order is always: persist `ANALYSIS_PENDING` → generate → persist the
+  Learning Note → persist `ANALYZED`. `successfully_analyzed` counts only
+  when all of generation, note insertion, and finalization are durable. If
+  finalization fails after the note is durable, the Article deliberately
+  stays at its last durable checkpoint (never a FAILED-with-note state);
+  the next run's note-existence reconciliation finalizes it without
+  regeneration. A `DuplicateLearningNoteError` during save is treated as
+  durable prior progress and reconciled, never replaced.
+* **No Unit of Work.** ADR-021's revisit trigger ("a future sprint needing
+  an atomic write spanning both repositories") is not hit: every partial-
+  write scenario self-heals through the same reconciliation logic used for
+  ordinary processing. One transaction per repository method is preserved.
+* **Summary counters are independent metrics.** `ProcessingSummary`'s
+  counters deliberately overlap (a successful new Article increments
+  `new_articles`, `successfully_extracted`, and `successfully_analyzed`);
+  there is no partition invariant over `total_discovered`. The only
+  enforced arithmetic is `failed == len(failure_details)`, plus
+  non-negativity. `reconciled` is separate from `successfully_analyzed` so
+  the latter always means "the generator actually ran and succeeded".
+* **Safe failure details.** `FailureDetail` carries only identifiers
+  (Article UUID, source, external id, query-stripped URL), a closed
+  `PipelineStage`, a fixed category, and an internally constructed message
+  - never article text, prompts, provider output, SQL detail, or raw
+  exception representations.
+* **Synchronous CLI composition root, no automatic migrations.**
+  `app/cli.py` (stdlib `argparse`) provides `process-feed
+  [--retry-failed]` and `retry-article <UUID>`, composes the concrete
+  adapters, verifies configuration and database readiness up front (with a
+  fixed safe message pointing at `alembic upgrade head` - migrations are
+  never run automatically), and exits 0 only for a run with no
+  Article-level failures. No scheduling, background workers, or new FastAPI
+  routes exist.
+
+### Alternatives Considered
+
+1. A per-`ProcessingStatus` switch for resumption (rejected - cannot
+   cleanly cover inconsistent stored states such as `EXTRACTED` with blank
+   text or a non-`ANALYZED` Article with an existing note; ground truth
+   subsumes every case).
+2. Introducing a Unit of Work for note+finalization atomicity (rejected -
+   reconciliation demonstrably satisfies every roadmap acceptance
+   criterion, and ADR-021's trigger for revisiting is therefore not met).
+3. Parsing `failure_reason` prefixes to choose the retry stage (rejected -
+   fragile string coupling; note-existence and text-presence already
+   determine the stage deterministically).
+4. Auto-regenerating a missing note for an `ANALYZED` Article (rejected -
+   masks a real correctness bug and can double-spend an LLM call; an
+   explicit second retry action regenerates it deliberately).
+5. A `retry-failed` sweep over all FAILED rows in `process()` (rejected -
+   `retry_article` already covers off-feed retry precisely; a bulk sweep
+   is speculative for personal-use scale).
+6. Writing partial extraction text into `raw_text` to "preserve partial
+   results" (rejected - would corrupt the analysis-ready meaning of
+   `raw_text` and cause retries to send unusably short text to the LLM;
+   partial progress is preserved at the Article-row level instead).
+
+### Rationale
+
+Ground-truth reconciliation makes idempotency a property of the design
+rather than of any single write: every interrupted sequence - crash before
+extraction, before analysis, between note save and finalization - converges
+to the correct state on the next run through the same decision tree, with
+no special-cased recovery code and no cross-repository transaction. The
+note-first write order guarantees the one invariant reconciliation cannot
+repair (an `ANALYZED` claim with no note) is never produced by normal
+operation, which is precisely why its presence is treated as a reportable
+violation rather than self-healed.
+
+### Consequences
+
+#### Positive
+
+* Reruns are idempotent end to end: no duplicate Articles, no duplicate
+  Learning Notes, no repeated generator calls for completed work.
+* Any failed Article is retryable - in the feed window via
+  `--retry-failed`, or off-window via `retry-article` - without any new
+  schema (no failure-stage column, no attempt history).
+* One Article's failure (expected or defective) never stops the batch, and
+  every failure surfaces as a structured, privacy-safe detail.
+
+#### Negative
+
+* Counters that intentionally overlap require reading the documented
+  semantics; naive summing against `total_discovered` is wrong by design.
+* Without a Unit of Work, transient gap states (for example
+  `ANALYSIS_PENDING` with an existing note) are visible between runs; they
+  are safe and self-healing but can momentarily confuse a direct database
+  reader.
+* `process(retry_failed=True)` reaches only feed-visible Articles; an
+  operator must know `retry-article` exists for everything else (the CLI
+  help says so).
+
+### Revisit When
+
+Revisit the no-Unit-of-Work decision if a future sprint adds an operation
+where reconciliation cannot converge (for example multi-note-per-article
+semantics). Revisit the sequential-only execution when Phase 1's personal-
+use scale assumption changes. Revisit the changed-URL policy if a future
+source legitimately reuses external IDs across genuinely different
+articles.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -1760,6 +1928,7 @@ multi-turn use) that the current Protocol does not expose.
 | ADR-020 | Synchronous `ArticleExtractor` port with status-based outcomes | Accepted |
 | ADR-021 | SQLite persistence via application repository ports and explicit domain/ORM mapping | Accepted |
 | ADR-022 | Structured Learning Note generation through OpenAI Responses | Accepted |
+| ADR-023 | Synchronous idempotent processing pipeline with ordered persistence and reconciliation | Accepted |
 
 ---
 
