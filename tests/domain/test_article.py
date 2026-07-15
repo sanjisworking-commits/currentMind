@@ -131,3 +131,83 @@ def test_article_rejects_empty_source() -> None:
     kwargs["source"] = "  "
     with pytest.raises(ValidationError):
         Article(**kwargs)
+
+
+def test_article_rejects_unknown_field() -> None:
+    kwargs = _article_kwargs()
+    kwargs["nonexistent_field"] = "x"
+    with pytest.raises(ValidationError):
+        Article(**kwargs)
+
+
+def test_article_candidate_rejects_unknown_field() -> None:
+    with pytest.raises(ValidationError):
+        ArticleCandidate(
+            source="s",
+            title="t",
+            url="https://example.com/a",
+            bogus="x",  # type: ignore[call-arg]
+        )
+
+
+def test_article_assignment_rejects_invalid_processing_status() -> None:
+    article = Article(**_article_kwargs())
+    with pytest.raises(ValidationError):
+        article.processing_status = "bogus"  # type: ignore[assignment]
+
+
+def test_article_assignment_rejects_naive_datetime() -> None:
+    article = Article(**_article_kwargs())
+    with pytest.raises(ValidationError):
+        article.updated_at = datetime(2026, 7, 1)
+
+
+def test_article_assignment_rejects_updated_before_created() -> None:
+    kwargs = _article_kwargs()
+    kwargs["created_at"] = _utc(2026, 7, 2)
+    kwargs["updated_at"] = _utc(2026, 7, 2)
+    article = Article(**kwargs)
+    with pytest.raises(ValidationError):
+        article.updated_at = _utc(2026, 7, 1)
+
+
+@pytest.mark.parametrize(
+    "categories", [["polity", ""], ["polity", "   "]], ids=["empty", "whitespace"]
+)
+def test_article_candidate_rejects_blank_category(categories: list[str]) -> None:
+    with pytest.raises(ValidationError):
+        ArticleCandidate(source="s", title="t", url="https://example.com/a", categories=categories)
+
+
+def test_article_candidate_rejects_duplicate_categories() -> None:
+    with pytest.raises(ValidationError):
+        ArticleCandidate(
+            source="s",
+            title="t",
+            url="https://example.com/a",
+            categories=["polity", "Polity ", " polity"],
+        )
+
+
+def test_article_candidate_strips_category_whitespace() -> None:
+    candidate = ArticleCandidate(
+        source="s",
+        title="t",
+        url="https://example.com/a",
+        categories=[" polity ", "economy"],
+    )
+    assert candidate.categories == ["polity", "economy"]
+
+
+def test_article_rejects_blank_category() -> None:
+    kwargs = _article_kwargs()
+    kwargs["categories"] = ["polity", "  "]
+    with pytest.raises(ValidationError):
+        Article(**kwargs)
+
+
+def test_article_rejects_duplicate_categories() -> None:
+    kwargs = _article_kwargs()
+    kwargs["categories"] = ["polity", "polity"]
+    with pytest.raises(ValidationError):
+        Article(**kwargs)

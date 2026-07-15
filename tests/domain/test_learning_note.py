@@ -72,6 +72,17 @@ def test_prelims_question_rejects_empty_option_text() -> None:
         )
 
 
+@pytest.mark.parametrize("correct_option", [True, "2", 1.0])
+def test_prelims_question_rejects_non_strict_correct_option(correct_option: object) -> None:
+    with pytest.raises(ValidationError):
+        PrelimsQuestion(
+            question="Q",
+            options=_valid_options(),
+            correct_option=correct_option,  # type: ignore[arg-type]
+            explanation="E",
+        )
+
+
 def test_valid_mains_question() -> None:
     question = MainsQuestion(question="Discuss the significance of X.")
     assert question.question == "Discuss the significance of X."
@@ -162,3 +173,45 @@ def test_learning_note_accepts_valid_nested_questions() -> None:
     note = LearningNote(**kwargs)
     assert len(note.prelims_questions) == 1
     assert len(note.mains_questions) == 1
+
+
+def test_learning_note_rejects_unknown_field() -> None:
+    kwargs = _valid_learning_note_kwargs()
+    kwargs["bogus_field"] = "x"
+    with pytest.raises(ValidationError):
+        LearningNote(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "subjects",
+        "syllabus_topics",
+        "static_concepts",
+        "constitutional_linkages",
+        "government_schemes",
+        "reports_and_committees",
+        "international_dimensions",
+        "important_facts",
+        "keywords",
+    ],
+)
+def test_learning_note_rejects_blank_text_list_entry(field: str) -> None:
+    kwargs = _valid_learning_note_kwargs()
+    kwargs[field] = ["Polity", "   "]
+    with pytest.raises(ValidationError):
+        LearningNote(**kwargs)
+
+
+def test_learning_note_rejects_duplicate_text_list_entries() -> None:
+    kwargs = _valid_learning_note_kwargs()
+    kwargs["keywords"] = ["monsoon", " monsoon "]
+    with pytest.raises(ValidationError):
+        LearningNote(**kwargs)
+
+
+def test_learning_note_strips_text_list_entries() -> None:
+    kwargs = _valid_learning_note_kwargs()
+    kwargs["keywords"] = [" monsoon ", "el nino"]
+    note = LearningNote(**kwargs)
+    assert note.keywords == ["monsoon", "el nino"]

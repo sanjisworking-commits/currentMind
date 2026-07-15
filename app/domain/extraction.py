@@ -8,8 +8,9 @@ extraction behaviour is implemented here.
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
+from app.domain.base import DomainModel
 from app.domain.validation import ensure_utc, non_empty_text, utc_now, validate_http_url
 
 
@@ -23,7 +24,7 @@ class ExtractionStatus(StrEnum):
     UNEXPECTED_ERROR = "unexpected_error"
 
 
-class ExtractedArticle(BaseModel):
+class ExtractedArticle(DomainModel):
     """Result of attempting to extract content from an article URL."""
 
     url: str

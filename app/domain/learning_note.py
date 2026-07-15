@@ -3,18 +3,19 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator
 
+from app.domain.base import DomainModel
 from app.domain.enums import GSPaper
-from app.domain.validation import ensure_utc, non_empty_text, utc_now
+from app.domain.validation import clean_text_list, ensure_utc, non_empty_text, utc_now
 
 
-class PrelimsQuestion(BaseModel):
+class PrelimsQuestion(DomainModel):
     """A UPSC-style Prelims multiple-choice question with exactly 4 options."""
 
     question: str
     options: list[str]
-    correct_option: int
+    correct_option: int = Field(strict=True, ge=0, le=3)
     explanation: str
 
     @field_validator("question", "explanation")
@@ -32,14 +33,8 @@ class PrelimsQuestion(BaseModel):
             raise ValueError("PrelimsQuestion options must not contain duplicates")
         return cleaned
 
-    @model_validator(mode="after")
-    def _validate_correct_option(self) -> "PrelimsQuestion":
-        if not 0 <= self.correct_option < len(self.options):
-            raise ValueError("correct_option must reference an existing option")
-        return self
 
-
-class MainsQuestion(BaseModel):
+class MainsQuestion(DomainModel):
     """A UPSC-style Mains analytical question."""
 
     question: str
@@ -50,10 +45,29 @@ class MainsQuestion(BaseModel):
         return non_empty_text(value)
 
 
-class LearningNote(BaseModel):
+class LearningNote(DomainModel):
     """The structured, UPSC-oriented learning output generated from an article."""
 
-    model_config = ConfigDict(protected_namespaces=())
+    # "model_name" collides with Pydantic's default "model_" protected-namespace
+    # prefix. Rather than disabling protection entirely, list the actual
+    # reserved BaseModel attribute names (deduplicated to their shortest
+    # covering prefix) so real conflicts are still caught but "model_name" is not.
+    model_config = ConfigDict(
+        protected_namespaces=(
+            "model_computed_fields",
+            "model_config",
+            "model_construct",
+            "model_copy",
+            "model_dump",
+            "model_extra",
+            "model_fields",
+            "model_json_schema",
+            "model_parametrized_name",
+            "model_post_init",
+            "model_rebuild",
+            "model_validate",
+        )
+    )
 
     id: UUID = Field(default_factory=uuid4)
     article_id: UUID
@@ -80,6 +94,21 @@ class LearningNote(BaseModel):
     @classmethod
     def _validate_required_text(cls, value: str) -> str:
         return non_empty_text(value)
+
+    @field_validator(
+        "subjects",
+        "syllabus_topics",
+        "static_concepts",
+        "constitutional_linkages",
+        "government_schemes",
+        "reports_and_committees",
+        "international_dimensions",
+        "important_facts",
+        "keywords",
+    )
+    @classmethod
+    def _validate_text_lists(cls, value: list[str]) -> list[str]:
+        return clean_text_list(value)
 
     @field_validator("created_at")
     @classmethod

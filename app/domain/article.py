@@ -3,13 +3,20 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
+from app.domain.base import DomainModel
 from app.domain.enums import ProcessingStatus
-from app.domain.validation import ensure_utc, non_empty_text, utc_now, validate_http_url
+from app.domain.validation import (
+    clean_text_list,
+    ensure_utc,
+    non_empty_text,
+    utc_now,
+    validate_http_url,
+)
 
 
-class ArticleCandidate(BaseModel):
+class ArticleCandidate(DomainModel):
     """A source-neutral article discovered from a feed, before persistence."""
 
     source: str
@@ -37,8 +44,13 @@ class ArticleCandidate(BaseModel):
             return None
         return ensure_utc(value)
 
+    @field_validator("categories")
+    @classmethod
+    def _validate_categories(cls, value: list[str]) -> list[str]:
+        return clean_text_list(value)
 
-class Article(BaseModel):
+
+class Article(DomainModel):
     """A persisted article moving through the processing pipeline."""
 
     id: UUID = Field(default_factory=uuid4)
@@ -70,6 +82,11 @@ class Article(BaseModel):
         if value is None:
             return None
         return ensure_utc(value)
+
+    @field_validator("categories")
+    @classmethod
+    def _validate_categories(cls, value: list[str]) -> list[str]:
+        return clean_text_list(value)
 
     @field_validator("created_at", "updated_at")
     @classmethod

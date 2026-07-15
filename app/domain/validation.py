@@ -37,3 +37,11 @@ def non_empty_text(value: str) -> str:
     if not stripped:
         raise ValueError("value must not be empty or whitespace-only")
     return stripped
+
+
+def clean_text_list(values: list[str]) -> list[str]:
+    """Strip each entry, reject blanks, and reject duplicates after stripping."""
+    cleaned = [non_empty_text(value) for value in values]
+    if len(set(cleaned)) != len(cleaned):
+        raise ValueError("list entries must not contain duplicates")
+    return cleaned
