@@ -45,6 +45,58 @@ class MainsQuestion(DomainModel):
         return non_empty_text(value)
 
 
+class LearningNoteContent(DomainModel):
+    """The AI-authored content of a Learning Note, validated on its own.
+
+    Contains only fields an LLM may produce. Trusted metadata that must never
+    be influenced by model output - `id`, `article_id`, `model_name`,
+    `prompt_version`, `created_at` - lives exclusively on `LearningNote` and
+    is supplied locally by application code (see
+    `app.application.learning_notes.assemble_learning_note`).
+
+    Every field is required with no default: OpenAI Structured Outputs
+    requires all fields to be present in the model's response, so an
+    irrelevant category must be returned as an explicit empty list by the
+    model itself, never omitted and backfilled locally.
+    """
+
+    summary: str
+    why_it_matters: str
+    gs_papers: list[GSPaper]
+    subjects: list[str]
+    syllabus_topics: list[str]
+    static_concepts: list[str]
+    constitutional_linkages: list[str]
+    government_schemes: list[str]
+    reports_and_committees: list[str]
+    international_dimensions: list[str]
+    important_facts: list[str]
+    prelims_questions: list[PrelimsQuestion]
+    mains_questions: list[MainsQuestion]
+    revision_note: str
+    keywords: list[str]
+
+    @field_validator("summary", "why_it_matters", "revision_note")
+    @classmethod
+    def _validate_required_text(cls, value: str) -> str:
+        return non_empty_text(value)
+
+    @field_validator(
+        "subjects",
+        "syllabus_topics",
+        "static_concepts",
+        "constitutional_linkages",
+        "government_schemes",
+        "reports_and_committees",
+        "international_dimensions",
+        "important_facts",
+        "keywords",
+    )
+    @classmethod
+    def _validate_text_lists(cls, value: list[str]) -> list[str]:
+        return clean_text_list(value)
+
+
 class LearningNote(DomainModel):
     """The structured, UPSC-oriented learning output generated from an article."""
 

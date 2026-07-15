@@ -6,7 +6,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.domain.enums import GSPaper
-from app.domain.learning_note import LearningNote, MainsQuestion, PrelimsQuestion
+from app.domain.learning_note import (
+    LearningNote,
+    LearningNoteContent,
+    MainsQuestion,
+    PrelimsQuestion,
+)
 
 
 def _valid_options() -> list[str]:
@@ -215,3 +220,214 @@ def test_learning_note_strips_text_list_entries() -> None:
     kwargs["keywords"] = [" monsoon ", "el nino"]
     note = LearningNote(**kwargs)
     assert note.keywords == ["monsoon", "el nino"]
+
+
+def _valid_content_kwargs() -> dict[str, Any]:
+    return {
+        "summary": "A concise summary.",
+        "why_it_matters": "It matters because of Z.",
+        "gs_papers": [],
+        "subjects": [],
+        "syllabus_topics": [],
+        "static_concepts": [],
+        "constitutional_linkages": [],
+        "government_schemes": [],
+        "reports_and_committees": [],
+        "international_dimensions": [],
+        "important_facts": [],
+        "prelims_questions": [],
+        "mains_questions": [],
+        "revision_note": "Revise the key points.",
+        "keywords": [],
+    }
+
+
+def test_valid_learning_note_content_with_all_empty_lists() -> None:
+    content = LearningNoteContent(**_valid_content_kwargs())
+    assert content.gs_papers == []
+    assert content.prelims_questions == []
+
+
+def test_learning_note_content_accepts_full_valid_output() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["gs_papers"] = [GSPaper.GS2, GSPaper.GS3]
+    kwargs["subjects"] = ["polity"]
+    kwargs["prelims_questions"] = [
+        {
+            "question": "Q",
+            "options": _valid_options(),
+            "correct_option": 1,
+            "explanation": "E",
+        }
+    ]
+    kwargs["mains_questions"] = [{"question": "Discuss X."}]
+    content = LearningNoteContent(**kwargs)
+    assert content.gs_papers == [GSPaper.GS2, GSPaper.GS3]
+    assert len(content.prelims_questions) == 1
+    assert len(content.mains_questions) == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "summary",
+        "why_it_matters",
+        "gs_papers",
+        "subjects",
+        "syllabus_topics",
+        "static_concepts",
+        "constitutional_linkages",
+        "government_schemes",
+        "reports_and_committees",
+        "international_dimensions",
+        "important_facts",
+        "prelims_questions",
+        "mains_questions",
+        "revision_note",
+        "keywords",
+    ],
+)
+def test_learning_note_content_rejects_missing_field(field: str) -> None:
+    kwargs = _valid_content_kwargs()
+    del kwargs[field]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_empty_list_accepted_for_every_list_field() -> None:
+    # every list field defaults to [] in _valid_content_kwargs(); this test
+    # documents that an explicit empty list is a valid, accepted value, not
+    # merely tolerated as a default.
+    content = LearningNoteContent(**_valid_content_kwargs())
+    assert content.subjects == []
+    assert content.gs_papers == []
+    assert content.prelims_questions == []
+    assert content.mains_questions == []
+
+
+def test_learning_note_content_rejects_invalid_gs_paper() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["gs_papers"] = ["gs5"]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_rejects_unknown_field() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["bogus_field"] = "x"
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_rejects_wrong_number_of_mcq_options() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["prelims_questions"] = [
+        {"question": "Q", "options": ["A", "B", "C"], "correct_option": 0, "explanation": "E"}
+    ]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_rejects_duplicate_mcq_options() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["prelims_questions"] = [
+        {
+            "question": "Q",
+            "options": ["A", "A", "B", "C"],
+            "correct_option": 0,
+            "explanation": "E",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_rejects_blank_mcq_option() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["prelims_questions"] = [
+        {
+            "question": "Q",
+            "options": ["A", "B", "  ", "D"],
+            "correct_option": 0,
+            "explanation": "E",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+@pytest.mark.parametrize("correct_option", [True, "2", 1.0])
+def test_learning_note_content_rejects_non_strict_correct_option(correct_option: object) -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["prelims_questions"] = [
+        {
+            "question": "Q",
+            "options": _valid_options(),
+            "correct_option": correct_option,
+            "explanation": "E",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+@pytest.mark.parametrize("correct_option", [-1, 4])
+def test_learning_note_content_rejects_out_of_range_correct_option(correct_option: int) -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["prelims_questions"] = [
+        {
+            "question": "Q",
+            "options": _valid_options(),
+            "correct_option": correct_option,
+            "explanation": "E",
+        }
+    ]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_rejects_missing_nested_question_field() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["prelims_questions"] = [
+        {"question": "Q", "options": _valid_options(), "correct_option": 0}
+    ]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+@pytest.mark.parametrize("field", ["summary", "why_it_matters", "revision_note"])
+def test_learning_note_content_rejects_blank_narrative_field(field: str) -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs[field] = "   "
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_rejects_duplicate_cleaned_list_entries() -> None:
+    kwargs = _valid_content_kwargs()
+    kwargs["keywords"] = ["monsoon", " monsoon "]
+    with pytest.raises(ValidationError):
+        LearningNoteContent(**kwargs)
+
+
+def test_learning_note_content_fields_have_no_defaults() -> None:
+    for name, field in LearningNoteContent.model_fields.items():
+        assert field.is_required(), f"{name} must be required with no default"
+
+
+def test_learning_note_content_has_no_trusted_metadata_fields() -> None:
+    forbidden = {"id", "article_id", "model_name", "prompt_version", "created_at"}
+    assert forbidden.isdisjoint(LearningNoteContent.model_fields.keys())
+
+
+def test_learning_note_content_field_parity_with_learning_note_ai_authored_fields() -> None:
+    """LearningNoteContent's fields must be exactly LearningNote's fields minus
+    trusted metadata. This fails if a future content field is added to one
+    model but not reflected in the other, since assembly
+    (`app.application.learning_notes.assemble_learning_note`) depends on this
+    parity holding.
+    """
+    trusted_metadata_fields = {"id", "article_id", "model_name", "prompt_version", "created_at"}
+    content_fields = set(LearningNoteContent.model_fields.keys())
+    note_ai_authored_fields = set(LearningNote.model_fields.keys()) - trusted_metadata_fields
+    assert content_fields == note_ai_authored_fields

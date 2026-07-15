@@ -10,7 +10,7 @@ and `docs/ROADMAP.md` for the full product and engineering plan.
 
 ## Current Status
 
-**Sprint 4 — Persistence Layer.** Sprint 0 provides the application
+**Sprint 5 — LLM Analysis Contract and Prompt.** Sprint 0 provides the application
 skeleton, configuration, logging, and health-check endpoint. Sprint 1 adds
 the core domain layer (`app/domain/`): `ArticleCandidate`, `Article`,
 `ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`, and
@@ -153,8 +153,78 @@ Key behaviour:
   `hide_parameters=True`, so no exception message or log line can ever
   include bound parameter values (article or Learning Note content).
 
+Sprint 5 adds structured LLM analysis:
+
+* `app/application/learning_notes.py` — the `LearningNoteGenerator` port
+  (`generate(article: Article) -> LearningNote`), the
+  `LearningNoteGenerationError`/`LearningNoteProviderError`/
+  `LearningNoteValidationError` application errors, and the pure
+  `assemble_learning_note()` function.
+* `app/domain/learning_note.py` — adds `LearningNoteContent`, the
+  AI-authored subset of `LearningNote`'s fields (every category an LLM may
+  produce, none of the trusted metadata). `LearningNote` itself is
+  unchanged.
+* `app/infrastructure/prompt_loader.py` — `load_prompt_template()`, which
+  loads and validates a `string.Template` prompt file's exact placeholder
+  set.
+* `app/infrastructure/openai_generator.py` — `OpenAILearningNoteGenerator`,
+  the OpenAI Responses API implementation of `LearningNoteGenerator`.
+* `prompts/learning_note_v1_system.txt` and `prompts/learning_note_v1_user.txt`
+  — the versioned system and user prompt templates.
+
+Key behaviour:
+
+* `LearningNoteContent` contains only the 15 AI-authored fields (`summary`
+  through `keywords`) with **no defaults** — OpenAI Structured Outputs
+  requires every field present in every response, so an irrelevant category
+  must come back as an explicit empty list from the model itself, never
+  omitted and backfilled locally. It has no `id`, `article_id`,
+  `model_name`, `prompt_version`, or `created_at` fields at all, so the
+  model has no way to influence trusted metadata - not by convention, but
+  because those fields don't exist on the type sent to the LLM.
+* `assemble_learning_note()` builds the final `LearningNote` using explicit,
+  individually named keyword arguments for every field - never a `**dict`
+  spread - so there is no path through which content could override a
+  trusted field. `id` and `created_at` use `LearningNote`'s own domain
+  defaults unless a `created_at` is explicitly injected (for deterministic
+  tests).
+* Uses the OpenAI Responses API's native structured-output parsing
+  (`client.responses.parse(..., text_format=LearningNoteContent)`)
+  exclusively - no manual JSON parsing, Markdown-fence stripping, or regex
+  extraction anywhere. Pydantic (via the SDK's own use of
+  `model_validate_json`) is the sole validator of model output.
+* Exactly **three total validation attempts** (one original plus up to two
+  repair retries), triggered only by a `pydantic.ValidationError` raised
+  during parsing or a completed, non-refusal response with no parsed
+  content. A model refusal, an incomplete response
+  (`max_output_tokens`/`content_filter`), and any SDK-level operational
+  failure (transport, authentication, rate limit, server error) are never
+  retried by application code - each becomes an immediate
+  `LearningNoteProviderError`. The OpenAI SDK's own transport-level retries
+  (`max_retries`, default 2) operate underneath this, entirely separately.
+* The only test seam is `_ResponsesClient`, a narrow, infrastructure-private
+  `Protocol` covering just the `responses.parse(model=..., input=...,
+  text_format=...)` surface this adapter actually calls - not a fake
+  `LearningNoteGenerator`. Tests inject a handwritten fake implementing this
+  Protocol via the constructor's `responses=` parameter; production code
+  always constructs a real `openai.OpenAI` client from an explicit
+  `api_key=` parameter. The constructor requires exactly one of `api_key` or
+  `responses`, never both, never neither.
+* Prompts are plain UTF-8 text rendered with stdlib `string.Template`
+  (`$identifier` placeholders, `.substitute()` - never `.safe_substitute()`,
+  so a missing or unknown placeholder fails loudly). `PROMPT_VERSION = "v1"`
+  is a single source of truth: both prompt filenames are derived from it, so
+  bumping the version without adding the corresponding files fails
+  immediately with a clear `FileNotFoundError` rather than silently
+  reusing stale prompts.
+* Repair instructions sent back to the model on retry contain only
+  sanitized Pydantic error `type`/`loc`/`msg` fields
+  (`include_input=False`) - never the rejected value, never a raw
+  `str(exc)` rendering, which by Pydantic v2 default embeds the offending
+  input.
+
 There is no application service wiring RSS discovery to extraction to
-persistence yet, no LLM analysis, and no dashboard.
+persistence to analysis yet, and no dashboard.
 
 ## Requirements
 
@@ -189,11 +259,11 @@ cp .env.example .env
 
 | Variable          | Purpose                                              |
 | ----------------- | ----------------------------------------------------- |
-| `OPENAI_API_KEY`  | API key for LLM analysis (not used until Sprint 5)    |
+| `OPENAI_API_KEY`  | API key for `OpenAILearningNoteGenerator` (not wired to application startup until a later sprint) |
 | `DATABASE_URL`    | SQLite database location                               |
 | `RSS_URL`         | Indian Express UPSC Current Affairs feed URL           |
 | `LOG_LEVEL`       | Logging verbosity (e.g. `INFO`, `DEBUG`)               |
-| `LLM_MODEL`       | LLM model identifier (not used until Sprint 5)         |
+| `LLM_MODEL`       | LLM model identifier for `OpenAILearningNoteGenerator` (not wired to application startup until a later sprint) |
 
 Never commit a real `.env` file.
 
@@ -296,3 +366,28 @@ uv run mypy .
   autogenerated against a live database. Future schema changes should use
   `alembic revision --autogenerate` against a disposable database and then be
   reviewed by hand.
+* `OpenAILearningNoteGenerator` exists and is fully tested against a
+  handwritten fake, but nothing calls it: there is no processing pipeline,
+  no CLI command, and no application service wiring RSS discovery, article
+  extraction, or persistence into analysis. No automated test makes a live
+  OpenAI request, and Sprint 5 makes none either.
+* `Article`'s `processing_status`/`raw_text`/`failure_reason` are never
+  updated by generation - `LearningNoteGenerator.generate()` only reads
+  `article.raw_text` and returns a `LearningNote`; nothing persists the
+  result or marks the source `Article` as analyzed. That wiring, and the
+  decision of *when* an Article is ready for analysis, belongs to a future
+  orchestration sprint.
+* `OpenAILearningNoteGenerator` does not truncate long extracted article
+  text. Real UPSC current-affairs articles are short-to-medium news pieces
+  well within typical model context windows, and truncation risks silently
+  discarding article content. The documented risk: an abnormally long or
+  mis-extracted article could be rejected by the provider for exceeding the
+  configured model's context length - this surfaces as a normal
+  `LearningNoteProviderError`, not a crash, but is not retried.
+* OpenAI is the only supported provider; there is no Chat Completions
+  fallback and no multi-provider abstraction.
+* Application-level retries are validation-only (a `pydantic.ValidationError`
+  or a completed response with no parsed content), bounded at three total
+  attempts. Transport-level retry is entirely the OpenAI SDK's own concern
+  (`max_retries`, configured explicitly at client construction, default 2)
+  and is never duplicated by application code.
