@@ -10,7 +10,7 @@ and `docs/ROADMAP.md` for the full product and engineering plan.
 
 ## Current Status
 
-**Sprint 3 — Article Content Extraction.** Sprint 0 provides the application
+**Sprint 4 — Persistence Layer.** Sprint 0 provides the application
 skeleton, configuration, logging, and health-check endpoint. Sprint 1 adds
 the core domain layer (`app/domain/`): `ArticleCandidate`, `Article`,
 `ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`, and
@@ -95,8 +95,66 @@ Key behaviour:
   `INSUFFICIENT_CONTENT`, retaining whatever partial text Trafilatura
   returned; `SUCCESS` requires `len(cleaned_text) >= min_content_length`.
 
-There is no application service wiring RSS discovery to extraction yet, no
-persistence, no LLM analysis, and no dashboard.
+Sprint 4 adds SQLite persistence for Articles and Learning Notes:
+
+* `app/application/repositories.py` — the `ArticleRepository` and
+  `LearningNoteRepository` ports, the `ArticleWithLearningNote` combined-read
+  value, and the `RepositoryError`/`DuplicateArticleError`/
+  `DuplicateLearningNoteError`/`RelatedArticleNotFoundError` application
+  errors, which application code depends on instead of any concrete
+  persistence implementation.
+* `app/infrastructure/orm_models.py` — the `ArticleRow`/`LearningNoteRow`
+  SQLAlchemy 2.x declarative models. Infrastructure-only: never imported
+  outside `app/infrastructure/`.
+* `app/infrastructure/mappers.py` — pure functions translating between domain
+  models and ORM rows (`article_to_row`/`row_to_article`,
+  `learning_note_to_row`/`row_to_learning_note`, `update_row_from_article`).
+* `app/infrastructure/database.py` — `create_engine_from_url()` and
+  `create_session_factory()`, both taking an explicit database URL.
+* `app/infrastructure/sqlite_repositories.py` — `SQLiteArticleRepository` and
+  `SQLiteLearningNoteRepository`, the concrete SQLAlchemy/SQLite
+  implementations of the two repository ports.
+* `migrations/` — an Alembic environment with a single baseline revision
+  (`3318676bf824`) that creates the complete Sprint 4 schema.
+
+Key behaviour:
+
+* Cross-run deduplication is enforced by named database unique constraints —
+  `uq_articles_url` and `uq_articles_source_external_id` — not by an
+  application-level existence check before insert. SQLite permits repeated
+  `NULL external_id` values under the composite constraint, so RSS entries
+  with no GUID never falsely collide.
+* `Article` gained a `failure_reason: str | None` field: a `FAILED` article
+  must carry a non-empty reason, and every other status must carry `None`,
+  enforced transactionally (including under attribute assignment) so an
+  invalid transition is rejected outright rather than partially applied.
+* `learning_notes.article_id` has a named foreign key to `articles.id` with
+  `ON DELETE CASCADE`, and a named unique constraint limiting Phase 1 to one
+  Learning Note per Article.
+* Every `LearningNote` list field — including the nested `prelims_questions`
+  and `mains_questions` — is stored in its own JSON column; there is no
+  single opaque blob column.
+* SQLite has no native timezone storage. Every datetime read back from a row
+  is reconstructed as UTC-aware in the mapper layer before it reaches a
+  domain model, whose own validators reject naive datetimes outright.
+* `SQLiteArticleRepository`/`SQLiteLearningNoteRepository` open their own
+  session per method call (`session_factory.begin()` for writes,
+  `session_factory()` for reads); there is no shared long-lived session and
+  no Unit of Work.
+* `ExtractedArticle` is not persisted as a separate entity. Sprint 4 persists
+  only `Article`'s own fields (`raw_text`, `processing_status`,
+  `failure_reason`, `updated_at`) via `update()`; a future orchestration
+  sprint decides how an `ExtractedArticle` result changes an `Article`.
+* A recognized `IntegrityError` (matched against SQLite's own error-message
+  wording) becomes a specific `DuplicateArticleError`/`DuplicateLearningNoteError`/
+  `RelatedArticleNotFoundError`; any other `SQLAlchemyError` — including a
+  locked or unavailable database — becomes a generic `RepositoryError`, never
+  a misleading duplicate error. The engine is created with
+  `hide_parameters=True`, so no exception message or log line can ever
+  include bound parameter values (article or Learning Note content).
+
+There is no application service wiring RSS discovery to extraction to
+persistence yet, no LLM analysis, and no dashboard.
 
 ## Requirements
 
@@ -141,7 +199,28 @@ Never commit a real `.env` file.
 
 ## Database Setup
 
-Not yet applicable. No database models or migrations exist as of Sprint 0.
+The database schema is managed by Alembic. Apply the migration to create the
+local SQLite database (using `DATABASE_URL` from `.env`, defaulting to
+`sqlite:///./database/currentmind.db`):
+
+```bash
+uv run alembic upgrade head
+```
+
+This creates the `articles` and `learning_notes` tables. Re-running the
+command is safe (Alembic tracks the applied revision in an `alembic_version`
+table and is a no-op once already at `head`).
+
+To inspect or roll back the schema:
+
+```bash
+uv run alembic current   # show the currently applied revision
+uv run alembic history   # show all revisions
+uv run alembic downgrade base   # drop the Sprint 4 tables
+```
+
+Automated tests never touch this database — each test applies the same
+migration to an isolated temporary SQLite file under pytest's `tmp_path`.
 
 ## Running the Application
 
@@ -178,19 +257,21 @@ uv run mypy .
 
 ## Known Limitations
 
-* `IndianExpressRSSSource` can discover article candidates and
-  `TrafilaturaArticleExtractor` can extract clean text from a URL, but
-  nothing yet connects them: there is no application service, CLI command,
-  or scheduler wiring discovery into extraction into a pipeline. Persistence,
-  LLM analysis, and the dashboard do not exist yet.
+* `IndianExpressRSSSource` can discover article candidates,
+  `TrafilaturaArticleExtractor` can extract clean text from a URL, and
+  `SQLiteArticleRepository`/`SQLiteLearningNoteRepository` can persist and
+  retrieve them, but nothing yet connects these into a pipeline: there is no
+  application service, CLI command, or scheduler wiring discovery into
+  extraction into persistence. No LLM analysis and no dashboard exist yet.
 * RSS request timeout and the User-Agent string are fixed module constants in
   `app/infrastructure/rss_source.py`, not environment-configurable, since
   Sprint 2 has no concrete need for that yet. `TrafilaturaArticleExtractor`
   follows the same pattern for its own timeout, User-Agent,
   `min_content_length`, and `max_response_bytes`.
-* Deduplication is within a single fetched response only; there is no
-  persistence-backed or cross-run duplicate detection yet (planned for
-  Sprint 4).
+* Cross-run deduplication is now enforced by database unique constraints
+  (`uq_articles_url`, `uq_articles_source_external_id`), but nothing yet
+  calls `ArticleRepository` from RSS discovery — that wiring is planned for
+  Sprint 6.
 * `TrafilaturaArticleExtractor` performs no DNS resolution or IP-range
   filtering (no localhost/private-address/redirect-target protection). This
   is intentional for Sprint 3: `extract(url)` is only ever called by internal
@@ -200,5 +281,18 @@ uv run mypy .
   article-submission API, public endpoint, or other untrusted URL input.
 * Full PDF, image, and OCR extraction are out of scope; such content types
   are rejected as `UNSUPPORTED_PAGE` before Trafilatura runs.
-* No database exists yet; `database/` and `logs/` are present as placeholders
-  for later sprints.
+* `ExtractedArticle` (the Sprint 3 extraction result) is not persisted as a
+  separate entity — there are no `extraction_status`/`extracted_at`/
+  `extraction_error_reason` columns and no history of extraction attempts.
+  Only the `Article` fields that already exist (`raw_text`,
+  `processing_status`, `failure_reason`, `updated_at`) are persisted, via
+  `ArticleRepository.update()`. A future orchestration sprint decides how an
+  `ExtractedArticle` result changes an `Article`.
+* There is no cross-repository transaction atomicity between
+  `ArticleRepository` and `LearningNoteRepository` calls (no Unit of Work);
+  each repository method commits its own transaction independently.
+* The Alembic baseline revision (`migrations/versions/3318676bf824_*.py`) is
+  hand-written to mirror `app/infrastructure/orm_models.py`, not
+  autogenerated against a live database. Future schema changes should use
+  `alembic revision --autogenerate` against a disposable database and then be
+  reviewed by hand.

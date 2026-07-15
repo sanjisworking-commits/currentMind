@@ -1,9 +1,10 @@
 """Article domain models: pre-persistence candidates and persisted articles."""
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID, uuid4
 
-from pydantic import Field, ValidationInfo, field_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 
 from app.domain.base import DomainModel
 from app.domain.enums import ProcessingStatus
@@ -63,6 +64,7 @@ class Article(DomainModel):
     categories: list[str] = Field(default_factory=list)
     raw_text: str | None = None
     processing_status: ProcessingStatus
+    failure_reason: str | None = None
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 
@@ -87,6 +89,33 @@ class Article(DomainModel):
     @classmethod
     def _validate_categories(cls, value: list[str]) -> list[str]:
         return clean_text_list(value)
+
+    @field_validator("failure_reason")
+    @classmethod
+    def _validate_failure_reason(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return non_empty_text(value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_failure_reason_consistency(cls, data: Any) -> Any:
+        # mode="before" (rather than "after") so that, under validate_assignment,
+        # this sees the complete proposed field state before any field is
+        # mutated on the instance - an invalid proposal is rejected outright
+        # instead of being applied and then flagged.
+        if not isinstance(data, dict):
+            return data
+        processing_status = data.get("processing_status")
+        failure_reason = data.get("failure_reason")
+        if processing_status == ProcessingStatus.FAILED:
+            if failure_reason is None or not str(failure_reason).strip():
+                raise ValueError("a failed article must include a non-empty failure_reason")
+        elif processing_status is not None and failure_reason is not None:
+            raise ValueError(
+                f"processing_status {processing_status!r} must not include a failure_reason"
+            )
+        return data
 
     @field_validator("created_at")
     @classmethod

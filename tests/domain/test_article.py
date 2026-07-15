@@ -228,3 +228,65 @@ def test_article_rejects_duplicate_categories() -> None:
     kwargs["categories"] = ["polity", "polity"]
     with pytest.raises(ValidationError):
         Article(**kwargs)
+
+
+def test_failed_article_with_reason_is_valid() -> None:
+    kwargs = _article_kwargs()
+    kwargs["processing_status"] = ProcessingStatus.FAILED
+    kwargs["failure_reason"] = "Network timeout while extracting content."
+    article = Article(**kwargs)
+    assert article.failure_reason == "Network timeout while extracting content."
+
+
+def test_failed_article_without_reason_rejected() -> None:
+    kwargs = _article_kwargs()
+    kwargs["processing_status"] = ProcessingStatus.FAILED
+    with pytest.raises(ValidationError):
+        Article(**kwargs)
+
+
+def test_non_failed_article_with_reason_rejected() -> None:
+    kwargs = _article_kwargs()
+    kwargs["processing_status"] = ProcessingStatus.DISCOVERED
+    kwargs["failure_reason"] = "Should not be here"
+    with pytest.raises(ValidationError):
+        Article(**kwargs)
+
+
+def test_failed_article_rejects_whitespace_only_reason() -> None:
+    kwargs = _article_kwargs()
+    kwargs["processing_status"] = ProcessingStatus.FAILED
+    kwargs["failure_reason"] = "   "
+    with pytest.raises(ValidationError):
+        Article(**kwargs)
+
+
+def test_assignment_to_failed_without_reason_rejected_and_preserves_state() -> None:
+    article = Article(**_article_kwargs())
+    original_status = article.processing_status
+    with pytest.raises(ValidationError):
+        article.processing_status = ProcessingStatus.FAILED
+    assert article.processing_status == original_status
+    assert article.failure_reason is None
+
+
+def test_assignment_of_reason_without_failed_status_rejected_and_preserves_state() -> None:
+    article = Article(**_article_kwargs())
+    with pytest.raises(ValidationError):
+        article.failure_reason = "Some reason"
+    assert article.failure_reason is None
+
+
+def test_clearing_failure_state_and_moving_to_non_failed_status() -> None:
+    kwargs = _article_kwargs()
+    kwargs["processing_status"] = ProcessingStatus.FAILED
+    kwargs["failure_reason"] = "Extraction failed."
+    failed_article = Article(**kwargs)
+
+    recovered_kwargs = failed_article.model_dump()
+    recovered_kwargs["processing_status"] = ProcessingStatus.DISCOVERED
+    recovered_kwargs["failure_reason"] = None
+    recovered = Article(**recovered_kwargs)
+
+    assert recovered.processing_status == ProcessingStatus.DISCOVERED
+    assert recovered.failure_reason is None
