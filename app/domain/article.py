@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator
 
 from app.domain.base import DomainModel
 from app.domain.enums import ProcessingStatus
@@ -88,13 +88,20 @@ class Article(DomainModel):
     def _validate_categories(cls, value: list[str]) -> list[str]:
         return clean_text_list(value)
 
-    @field_validator("created_at", "updated_at")
+    @field_validator("created_at")
     @classmethod
-    def _validate_timestamps(cls, value: datetime) -> datetime:
-        return ensure_utc(value)
+    def _validate_created_at(cls, value: datetime, info: ValidationInfo) -> datetime:
+        value = ensure_utc(value)
+        updated_at = info.data.get("updated_at")
+        if updated_at is not None and value > updated_at:
+            raise ValueError("created_at must not be later than updated_at")
+        return value
 
-    @model_validator(mode="after")
-    def _validate_updated_not_before_created(self) -> "Article":
-        if self.updated_at < self.created_at:
+    @field_validator("updated_at")
+    @classmethod
+    def _validate_updated_at(cls, value: datetime, info: ValidationInfo) -> datetime:
+        value = ensure_utc(value)
+        created_at = info.data.get("created_at")
+        if created_at is not None and value < created_at:
             raise ValueError("updated_at must not be earlier than created_at")
-        return self
+        return value

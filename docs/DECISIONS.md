@@ -1076,6 +1076,8 @@ Sprint 1 requires strongly typed, validated domain models (`ArticleCandidate`, `
 * All domain models are ordinary (non-frozen) Pydantic v2 `BaseModel` classes. Freezing was considered and rejected: frozen models still contain mutable `list` fields, so freezing provides only partial, misleading immutability while adding friction for future application-layer code that updates entity state (e.g. `Article.processing_status`).
 * Identity fields use Python's native `UUID` type generated via `Field(default_factory=uuid4)` (`Article.id`, `LearningNote.id`, `LearningNote.article_id`), letting Pydantic handle parsing, validation, and JSON serialization natively. No custom ID-generation or ID-validation helper is introduced.
 * All timestamp fields are timezone-aware `datetime` values. A shared `ensure_utc` validator rejects naive datetimes and normalizes any aware datetime to UTC; a shared `utc_now()` factory is the canonical source of "now" for `created_at`/`updated_at`/`extracted_at` defaults.
+* All domain models inherit a shared `DomainModel` base (`app/domain/base.py`) configuring `extra="forbid"` (unknown fields rejected) and `validate_assignment=True` (attribute reassignment is revalidated, not just initial construction).
+* Cross-field invariants that must hold after attribute assignment (`Article.created_at`/`updated_at` ordering; `ExtractedArticle.status`/`text`/`error_reason` consistency) are implemented as field-level (`field_validator` with `ValidationInfo.data`) or `model_validator(mode="before")` checks rather than `model_validator(mode="after")`. An `after` model validator runs once the candidate value has already been written into the model's `__dict__`; if it then raises, the instance can be left mutated despite the `ValidationError`. Validating from the proposed field state *before* it is committed keeps a rejected assignment fully transactional — the previous valid values are retained.
 
 ### Alternatives Considered
 
@@ -1099,6 +1101,7 @@ Pydantic v2 is already the project's required validation library (CLAUDE.md §10
 
 * Mutable domain models mean application-layer code (future sprints) must be disciplined about not mutating shared instances unexpectedly; no compiler/runtime enforcement of immutability exists in Sprint 1.
 * Every aware-but-non-UTC datetime is silently converted to UTC rather than rejected, which is intentional but should be understood by future contributors.
+* `validate_assignment=True` validates *attribute reassignment* (`article.processing_status = ...`), not in-place mutation of a field's contents. `article.categories.append("x")` mutates the list object directly and triggers no validation at all; only assigning a whole new list (`article.categories = [...]`) is checked. Future sprints that mutate list-valued fields in place must not assume validation runs.
 
 ### Revisit When
 

@@ -7,6 +7,7 @@ extraction behaviour is implemented here.
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Any
 
 from pydantic import Field, field_validator, model_validator
 
@@ -50,13 +51,23 @@ class ExtractedArticle(DomainModel):
             return None
         return non_empty_text(value)
 
-    @model_validator(mode="after")
-    def _validate_status_consistency(self) -> "ExtractedArticle":
-        if self.status is ExtractionStatus.SUCCESS:
-            if self.text is None or not self.text.strip():
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_status_consistency(cls, data: Any) -> Any:
+        # mode="before" (rather than "after") so that, under validate_assignment,
+        # this sees the complete proposed field state before any field is
+        # mutated on the instance - an invalid proposal is rejected outright
+        # instead of being applied and then flagged.
+        if not isinstance(data, dict):
+            return data
+        status = data.get("status")
+        text = data.get("text")
+        error_reason = data.get("error_reason")
+        if status == ExtractionStatus.SUCCESS:
+            if text is None or not str(text).strip():
                 raise ValueError("a successful extraction must include non-empty text")
-            if self.error_reason is not None:
+            if error_reason is not None:
                 raise ValueError("a successful extraction must not include an error_reason")
-        elif self.error_reason is None:
-            raise ValueError(f"status '{self.status}' requires a non-empty error_reason")
-        return self
+        elif status is not None and error_reason is None:
+            raise ValueError(f"status {status!r} requires a non-empty error_reason")
+        return data

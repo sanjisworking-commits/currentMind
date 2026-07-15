@@ -152,14 +152,18 @@ def test_article_candidate_rejects_unknown_field() -> None:
 
 def test_article_assignment_rejects_invalid_processing_status() -> None:
     article = Article(**_article_kwargs())
+    original_status = article.processing_status
     with pytest.raises(ValidationError):
         article.processing_status = "bogus"  # type: ignore[assignment]
+    assert article.processing_status == original_status
 
 
 def test_article_assignment_rejects_naive_datetime() -> None:
     article = Article(**_article_kwargs())
+    original_updated_at = article.updated_at
     with pytest.raises(ValidationError):
         article.updated_at = datetime(2026, 7, 1)
+    assert article.updated_at == original_updated_at
 
 
 def test_article_assignment_rejects_updated_before_created() -> None:
@@ -167,8 +171,21 @@ def test_article_assignment_rejects_updated_before_created() -> None:
     kwargs["created_at"] = _utc(2026, 7, 2)
     kwargs["updated_at"] = _utc(2026, 7, 2)
     article = Article(**kwargs)
+    original_updated_at = article.updated_at
     with pytest.raises(ValidationError):
         article.updated_at = _utc(2026, 7, 1)
+    assert article.updated_at == original_updated_at
+
+
+def test_article_assignment_rejects_created_after_updated() -> None:
+    kwargs = _article_kwargs()
+    kwargs["created_at"] = _utc(2026, 7, 1)
+    kwargs["updated_at"] = _utc(2026, 7, 2)
+    article = Article(**kwargs)
+    original_created_at = article.created_at
+    with pytest.raises(ValidationError):
+        article.created_at = _utc(2026, 7, 3)
+    assert article.created_at == original_created_at
 
 
 @pytest.mark.parametrize(

@@ -3,7 +3,7 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import Field, field_validator
 
 from app.domain.base import DomainModel
 from app.domain.enums import GSPaper
@@ -47,27 +47,6 @@ class MainsQuestion(DomainModel):
 
 class LearningNote(DomainModel):
     """The structured, UPSC-oriented learning output generated from an article."""
-
-    # "model_name" collides with Pydantic's default "model_" protected-namespace
-    # prefix. Rather than disabling protection entirely, list the actual
-    # reserved BaseModel attribute names (deduplicated to their shortest
-    # covering prefix) so real conflicts are still caught but "model_name" is not.
-    model_config = ConfigDict(
-        protected_namespaces=(
-            "model_computed_fields",
-            "model_config",
-            "model_construct",
-            "model_copy",
-            "model_dump",
-            "model_extra",
-            "model_fields",
-            "model_json_schema",
-            "model_parametrized_name",
-            "model_post_init",
-            "model_rebuild",
-            "model_validate",
-        )
-    )
 
     id: UUID = Field(default_factory=uuid4)
     article_id: UUID

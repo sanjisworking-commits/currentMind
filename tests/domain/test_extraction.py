@@ -99,3 +99,47 @@ def test_rejects_unknown_status() -> None:
             status="bogus",  # type: ignore[arg-type]
             error_reason="x",
         )
+
+
+def test_assignment_rejects_failure_status_without_error_reason() -> None:
+    article = ExtractedArticle(
+        url="https://example.com/a",
+        status=ExtractionStatus.SUCCESS,
+        text="Body",
+    )
+    with pytest.raises(ValidationError):
+        article.status = ExtractionStatus.NETWORK_ERROR
+    assert article.status == ExtractionStatus.SUCCESS
+
+
+def test_assignment_rejects_clearing_text_on_success() -> None:
+    article = ExtractedArticle(
+        url="https://example.com/a",
+        status=ExtractionStatus.SUCCESS,
+        text="Body",
+    )
+    with pytest.raises(ValidationError):
+        article.text = None
+    assert article.text == "Body"
+
+
+def test_assignment_rejects_adding_error_reason_to_success() -> None:
+    article = ExtractedArticle(
+        url="https://example.com/a",
+        status=ExtractionStatus.SUCCESS,
+        text="Body",
+    )
+    with pytest.raises(ValidationError):
+        article.error_reason = "Should not be here"
+    assert article.error_reason is None
+
+
+def test_assignment_rejects_removing_error_reason_from_failure() -> None:
+    article = ExtractedArticle(
+        url="https://example.com/a",
+        status=ExtractionStatus.NETWORK_ERROR,
+        error_reason="Connection timed out.",
+    )
+    with pytest.raises(ValidationError):
+        article.error_reason = None
+    assert article.error_reason == "Connection timed out."
