@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <channel>
+    <title>Indian Express - UPSC Current Affairs</title>
+    <link>https://indianexpress.com/section/upsc-current-affairs/</link>
+    <description>UPSC Current Affairs</description>
+    <item>
+      <title>Cabinet approves new scheme for rural development</title>
+      <link>https://indianexpress.com/article/one</link>
+      <guid isPermaLink="false">ie-article-one</guid>
+      <pubDate>Mon, 01 Jul 2026 10:00:00 GMT</pubDate>
+      <dc:creator>Jane Doe</dc:creator>
+      <category>Polity</category>
+      <category>Governance</category>
+    </item>
+    <item>
+      <title>Second important article</title>
+      <link>https://indianexpress.com/article/two</link>
+      <guid isPermaLink="false">ie-article-two</guid>
+      <pubDate>Tue, 02 Jul 2026 08:30:00 GMT</pubDate>
+      <dc:creator>John Smith</dc:creator>
+      <category>Economy</category>
+    </item>
+  </channel>
+</rss>

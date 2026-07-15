@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Indian Express - UPSC Current Affairs</title>
+    <link>https://indianexpress.com/section/upsc-current-affairs/</link>
+    <description>UPSC Current Affairs</description>
+    <item>
+      <title>Article with an unparseable publication date</title>
+      <link>https://indianexpress.com/article/bad-date</link>
+      <guid isPermaLink="false">ie-bad-date</guid>
+      <pubDate>not a real date</pubDate>
+    </item>
+  </channel>
+</rss>
