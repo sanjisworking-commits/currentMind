@@ -206,6 +206,32 @@ def test_dedup_first_occurrence_wins_and_order_preserved() -> None:
     assert candidates[0].title == "First"
 
 
+def test_dedup_chained_id_reintroduced_via_skipped_entrys_url() -> None:
+    # A/U1 (kept), A/U2 (skipped: id A already seen), B/U2 (must also be
+    # skipped: U2 was already seen on the entry skipped just above, even
+    # though that entry was never itself accepted).
+    source = _source(_transport_returning("chained_duplicate_id_then_url_feed.xml"))
+
+    candidates = source.discover_articles()
+
+    assert len(candidates) == 1
+    assert candidates[0].external_id == "chain-id-a"
+    assert candidates[0].url == "https://indianexpress.com/chain/u1"
+
+
+def test_dedup_chained_url_reintroduced_via_skipped_entrys_id() -> None:
+    # X/U1 (kept), Y/U1 (skipped: url U1 already seen), Y/U3 (must also be
+    # skipped: id Y was already seen on the entry skipped just above, even
+    # though that entry was never itself accepted).
+    source = _source(_transport_returning("chained_duplicate_url_then_id_feed.xml"))
+
+    candidates = source.discover_articles()
+
+    assert len(candidates) == 1
+    assert candidates[0].external_id == "chain-id-x"
+    assert candidates[0].url == "https://indianexpress.com/chain/u1"
+
+
 # --- HTML entity / tag cleanup --------------------------------------------------
 
 

@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Indian Express - UPSC Current Affairs</title>
+    <link>https://indianexpress.com/section/upsc-current-affairs/</link>
+    <description>UPSC Current Affairs</description>
+    <item>
+      <title>Entry One</title>
+      <link>https://indianexpress.com/chain/u1</link>
+      <guid isPermaLink="false">chain-id-x</guid>
+    </item>
+    <item>
+      <title>Entry Two same url as one, new id</title>
+      <link>https://indianexpress.com/chain/u1</link>
+      <guid isPermaLink="false">chain-id-y</guid>
+    </item>
+    <item>
+      <title>Entry Three same id as two, new url</title>
+      <link>https://indianexpress.com/chain/u3</link>
+      <guid isPermaLink="false">chain-id-y</guid>
+    </item>
+  </channel>
+</rss>

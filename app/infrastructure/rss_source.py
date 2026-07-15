@@ -203,13 +203,15 @@ class IndianExpressRSSSource:
             is_duplicate = (
                 candidate.external_id is not None and candidate.external_id in seen_external_ids
             ) or candidate.url in seen_urls
-            if is_duplicate:
-                duplicate_count += 1
-                continue
 
             if candidate.external_id is not None:
                 seen_external_ids.add(candidate.external_id)
             seen_urls.add(candidate.url)
+
+            if is_duplicate:
+                duplicate_count += 1
+                continue
+
             candidates.append(candidate)
 
         if not candidates:
