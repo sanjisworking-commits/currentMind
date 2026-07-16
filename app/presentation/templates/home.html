@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, tag_list, gs_paper_badges %}
+
+{% block title %}Recent articles · CurrentMind{% endblock %}
+
+{% block content %}
+  <h1>Recent articles</h1>
+  <p class="page-description">
+    The most recent articles processed into UPSC Learning Notes.
+  </p>
+
+  {% if cards %}
+    <p class="result-scope">Showing the {{ cards | length }} most recent article(s).</p>
+    <ul class="article-list">
+      {% for card in cards %}
+        <li class="article-card">
+          <h2 class="article-card-title">
+            <a href="{{ url_for('article_detail', article_id=card.article_id) }}">{{ card.title }}</a>
+          </h2>
+          <p class="article-card-meta">
+            <span class="source">{{ humanize_source(card.source) }}</span>
+            {% if card.published_at %}
+              · <time datetime="{{ iso_datetime(card.published_at) }}">{{ format_date(card.published_at) }}</time>
+            {% else %}
+              · <span class="date-unavailable">{{ format_date(card.published_at) }}</span>
+            {% endif %}
+          </p>
+          {{ status_badge(card.processing_status) }}
+          {% if card.summary_excerpt %}
+            <p class="article-card-summary">{{ card.summary_excerpt }}</p>
+          {% elif not card.has_learning_note %}
+            <p class="article-card-summary muted">No Learning Note yet.</p>
+          {% endif %}
+          {{ gs_paper_badges(card.gs_papers) }}
+          {{ tag_list(card.topic_tags) }}
+          <p class="article-card-link">
+            <a href="{{ url_for('article_detail', article_id=card.article_id) }}">
+              Open Learning Note for {{ card.title }}
+            </a>
+          </p>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="empty-state">
+      No articles have been processed yet. Run the processing command to populate the dashboard.
+    </p>
+  {% endif %}
+{% endblock %}

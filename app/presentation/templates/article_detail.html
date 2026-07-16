@@ -1,0 +1,119 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status_badge, tag_list, gs_paper_badges, bullet_section %}
+
+{% block title %}{{ detail.title }} · CurrentMind{% endblock %}
+
+{% block content %}
+  <article class="article-detail">
+    <h1>{{ detail.title }}</h1>
+
+    <section class="article-metadata">
+      <dl>
+        <dt>Source</dt><dd>{{ humanize_source(detail.source) }}</dd>
+        {% if detail.author %}<dt>Author</dt><dd>{{ detail.author }}</dd>{% endif %}
+        <dt>Published</dt>
+        <dd>
+          {% if detail.published_at %}
+            <time datetime="{{ iso_datetime(detail.published_at) }}">{{ format_date(detail.published_at) }}</time>
+          {% else %}
+            {{ format_date(detail.published_at) }}
+          {% endif %}
+        </dd>
+        <dt>Added</dt>
+        <dd><time datetime="{{ iso_datetime(detail.created_at) }}">{{ format_datetime(detail.created_at) }}</time></dd>
+      </dl>
+      {{ tag_list(detail.categories) }}
+    </section>
+
+    <section class="status-panel">
+      {{ status_badge(detail.processing_status) }}
+      <p class="status-explanation">{{ status_presentation(detail.processing_status).explanation }}</p>
+      {% if detail.failure_reason %}
+        <p class="failure-reason">{{ detail.failure_reason }}</p>
+      {% endif %}
+    </section>
+
+    <p class="source-link">
+      <a href="{{ detail.url }}" rel="noopener noreferrer" target="_blank">Open the original article</a>
+    </p>
+
+    {% set note = detail.learning_note %}
+    {% if note is none %}
+      <section class="note-missing">
+        <p>No Learning Note is available for this article yet.</p>
+      </section>
+    {% else %}
+      <section class="note-section">
+        <h2>Executive summary</h2>
+        <p>{{ note.summary }}</p>
+      </section>
+
+      <section class="note-section">
+        <h2>Why it matters</h2>
+        <p>{{ note.why_it_matters }}</p>
+      </section>
+
+      <section class="note-section revision-note">
+        <h2>Revision note</h2>
+        <p>{{ note.revision_note }}</p>
+      </section>
+
+      {% if note.gs_papers or note.syllabus_topics %}
+        <section class="note-section">
+          <h2>GS papers and syllabus mapping</h2>
+          {{ gs_paper_badges(note.gs_papers) }}
+          {{ tag_list(note.syllabus_topics) }}
+        </section>
+      {% endif %}
+
+      {{ bullet_section("Important facts", note.important_facts) }}
+      {{ bullet_section("Static concepts", note.static_concepts) }}
+      {{ bullet_section("Constitutional linkages", note.constitutional_linkages) }}
+      {{ bullet_section("Government schemes", note.government_schemes) }}
+      {{ bullet_section("Reports and committees", note.reports_and_committees) }}
+      {{ bullet_section("International dimensions", note.international_dimensions) }}
+
+      {% if note.prelims_questions %}
+        <section class="note-section prelims">
+          <h2>Prelims questions</h2>
+          <ol class="prelims-list">
+            {% for question in note.prelims_questions %}
+              <li class="prelims-question">
+                <p class="question-text">{{ question.question }}</p>
+                <ol class="options" type="A">
+                  {% for option in question.options %}<li>{{ option }}</li>{% endfor %}
+                </ol>
+                <details class="answer">
+                  <summary>Show answer and explanation</summary>
+                  <p class="correct-answer">
+                    Correct answer:
+                    {{ "ABCD"[question.correct_option] }}. {{ question.options[question.correct_option] }}
+                  </p>
+                  <p class="explanation">{{ question.explanation }}</p>
+                </details>
+              </li>
+            {% endfor %}
+          </ol>
+        </section>
+      {% endif %}
+
+      {% if note.mains_questions %}
+        <section class="note-section mains">
+          <h2>Mains questions</h2>
+          <ol class="mains-list">
+            {% for question in note.mains_questions %}
+              <li class="mains-question">{{ question.question }}</li>
+            {% endfor %}
+          </ol>
+        </section>
+      {% endif %}
+
+      {% if note.keywords %}
+        <section class="note-section keywords">
+          <h2>Keywords</h2>
+          {{ tag_list(note.keywords) }}
+        </section>
+      {% endif %}
+    {% endif %}
+  </article>
+{% endblock %}

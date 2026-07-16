@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}CurrentMind{% endblock %}</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='dashboard.css') }}" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="container">
+        <a class="site-title" href="{{ url_for('home') }}">CurrentMind</a>
+        <p class="site-tagline">UPSC current-affairs Learning Notes</p>
+      </div>
+    </header>
+    <main id="main" class="container" tabindex="-1">
+      {% block content %}{% endblock %}
+    </main>
+    <footer class="site-footer">
+      <div class="container">
+        <p>CurrentMind — a personal, read-only study dashboard.</p>
+      </div>
+    </footer>
+  </body>
+</html>

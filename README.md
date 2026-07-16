@@ -10,7 +10,7 @@ and `docs/ROADMAP.md` for the full product and engineering plan.
 
 ## Current Status
 
-**Sprint 6 — Processing Pipeline.** Sprint 0 provides the application
+**Sprint 7 — Web Dashboard.** Sprint 0 provides the application
 skeleton, configuration, logging, and health-check endpoint. Sprint 1 adds
 the core domain layer (`app/domain/`): `ArticleCandidate`, `Article`,
 `ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`, and
@@ -261,7 +261,37 @@ Key behaviour:
   partition of `total_discovered`; the one arithmetic invariant is
   `failed == len(failure_details)`.
 
-There is no dashboard yet.
+Sprint 7 adds the read-only web dashboard:
+
+* `app/application/dashboard.py` — `DashboardQueryService` (implementing the
+  `DashboardQuery` port), which reads persisted Articles and Learning Notes
+  through the repository ports and assembles the immutable `ArticleCard` and
+  `ArticleDetail` read models. It imports no FastAPI/Jinja2/SQLAlchemy and
+  performs no writes.
+* `app/presentation/api.py` — the `create_app()` factory now serves `GET /`
+  (recent articles) and `GET /articles/{article_id}` (detail) with
+  server-rendered Jinja2 templates, alongside the unchanged `/health`.
+* `app/presentation/templates/` and `app/presentation/static/dashboard.css` —
+  the templates and one local stylesheet (no JavaScript, no build step, no
+  external assets).
+* `app/presentation/view_helpers.py` — display-only helpers (status labels,
+  source humanization, date formatting).
+
+Key behaviour:
+
+* **Strictly read-only.** No dashboard request writes to the database or calls
+  the processing pipeline, generator, extractor, or source — visiting the
+  dashboard never triggers processing.
+* **Bounded home page.** The home page shows the 30 most recent articles
+  (`1` list query + one Learning Note lookup per article); the full table is
+  never loaded.
+* **Safe display.** Every persisted field is rendered through Jinja2
+  autoescaping (no `|safe` anywhere); `Article.raw_text` is never placed in a
+  read model or template. A malformed article id returns 422, a well-formed
+  but unknown id returns an HTML 404, and a repository read failure renders a
+  fixed 503 page with no database detail.
+* Prelims answers/explanations use a native `<details>` disclosure, so the
+  dashboard works without JavaScript.
 
 ## Requirements
 
@@ -378,7 +408,30 @@ identifiers) — never article text or provider output.
 
 ## Starting the Dashboard
 
-Not yet implemented (planned for a later sprint).
+Apply the database migration first (`uv run alembic upgrade head`), then start
+the application:
+
+```bash
+uv run uvicorn main:app --reload
+```
+
+Open the dashboard at:
+
+* `http://127.0.0.1:8000/` — the most recent processed articles;
+* `http://127.0.0.1:8000/articles/<article-uuid>` — one article's full
+  Learning Note.
+
+The dashboard is **read-only**: visiting it never processes the feed, calls
+OpenAI, or writes to the database. Processing remains a separate, manually run
+CLI operation (`uv run python -m app.cli process-feed`); there is no scheduler
+and no automatic processing. The dashboard requires only `DATABASE_URL` (not
+`OPENAI_API_KEY`/`LLM_MODEL`), and no authentication. If the database is
+missing or unmigrated, pages return a safe "temporarily unavailable" response
+rather than an error trace.
+
+Optional filters (by GS paper, processing status, or keyword) are deferred:
+the required pages are complete without them, and none needs a new repository
+contract.
 
 ## Running Tests
 
@@ -395,8 +448,14 @@ uv run mypy .
 
 ## Known Limitations
 
-* There is no dashboard yet (planned for Sprint 7), and no automatic
-  scheduling or background processing — `process-feed` is run manually.
+* There is no automatic scheduling or background processing — `process-feed`
+  is run manually, and the dashboard never triggers it.
+* The dashboard is read-only and has no filters or pagination: the home page
+  shows the 30 most recent articles (one list query plus one Learning Note
+  lookup per article), and there is no archive navigation. Optional
+  status/GS-paper/keyword filters were deferred (see ADR-024).
+* The dashboard has no authentication and is intended for local single-user
+  use only.
 * RSS request timeout and the User-Agent string are fixed module constants in
   `app/infrastructure/rss_source.py`, not environment-configurable, since
   Sprint 2 has no concrete need for that yet. `TrafilaturaArticleExtractor`
