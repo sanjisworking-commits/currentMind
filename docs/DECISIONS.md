@@ -2037,6 +2037,105 @@ submission features.
 
 ---
 
+## ADR-025: Phase 1 Automated Verification and Controlled Live Validation
+
+**Status:** Accepted
+**Date:** 2026-07-16
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Phase 1 is feature-complete through Sprint 7. Sprint 8 ("Reliability,
+Documentation, and MVP Release") must establish how the MVP is verified before
+regular personal use, without adding production behavior. Two questions needed
+settling: what continuous verification the project runs (prior pull requests
+had zero attached checks), and how the roadmap's "process at least one real
+accessible Article" acceptance step is satisfied without putting a live,
+credential-bearing, network-dependent call into the automated suite.
+
+### Decision
+
+* **A minimal GitHub Actions CI workflow is the verification gate.**
+  `.github/workflows/ci.yml` runs on `push` to `main`, on `pull_request`, and
+  on `workflow_dispatch`, with `permissions: contents: read`, a
+  workflow+ref concurrency group with `cancel-in-progress: true`, an Ubuntu
+  runner, Python 3.12, and `uv`. It performs a frozen install
+  (`uv sync --frozen`) and runs `ruff check`, `mypy` (strict), and `pytest`,
+  plus a clean-migration smoke step (`upgrade head` → `downgrade base` →
+  `upgrade head`) against a disposable SQLite database under the runner's
+  temporary directory.
+* **The automated suite is external-service-free.** No secrets are configured
+  in CI; no step calls the live RSS feed, an Article page, or OpenAI, and no
+  step touches the repository database `database/currentmind.db`. Dependency
+  installation downloads the locked environment when the cache is cold, so CI
+  is described as *network-independent* / *external-service-free* rather than
+  literally "offline".
+* **Restart coverage is the existing engine-disposal/reopen tests.** The
+  `*_end_to_end.py` tests already prove persisted state survives a fresh
+  engine/session/connection against the same SQLite file; no subprocess
+  restart test is added.
+* **The one live acceptance step is a separate, controlled, manual
+  validation.** Processing one real Article requires explicit per-run
+  approval, uses locally-set credentials (never pasted into chat or
+  committed), a disposable temporary database, and a one-entry RSS document
+  served from a temporary localhost HTTP server (pointing at one selected
+  accessible Article) so the run is bounded to a single Article rather than
+  the live feed window. It uses the existing `process-feed` command — no
+  production "process one URL" command is added — verifies persistence,
+  `ANALYZED` status, and idempotent rerun, reports only sanitized
+  stage/success metadata (never Article body, prompt, key, or provider
+  output), and deletes the disposable database and temporary server afterward.
+* **Local single-user threat boundary.** The MVP is documented as local and
+  unauthenticated, not hardened for public internet exposure.
+* **No runtime release machinery.** Package version stays `0.1.0`; no
+  `__version__`, Git tag, or GitHub release is created by the sprint. An
+  operator-created `v0.1.0` tag is an optional manual step after the live
+  validation succeeds and final approval is given.
+
+### Alternatives Considered
+
+1. A full clean-clone install job in CI (rejected — heavier and redundant with
+   the frozen-install + migration-smoke steps; a fresh clone is covered by the
+   documented release checklist).
+2. A live smoke test inside CI (rejected — would require secrets and network,
+   violating the external-service-free boundary and ADR-012).
+3. A subprocess restart test (rejected — engine-dispose/reopen already proves
+   the behavior; a spawned process adds flakiness for no added guarantee).
+4. A dedicated production "process one URL" release command (rejected —
+   production surface added solely for a one-off smoke test; a local one-entry
+   RSS wrapper bounds the existing command instead).
+
+### Rationale
+
+CI turns the already-external-service-free suite into an enforced gate,
+addressing the concrete absence of checks on prior pull requests, while the
+controlled manual validation satisfies the single live acceptance criterion
+without compromising the automated suite's independence or leaking secrets.
+
+### Consequences
+
+#### Positive
+
+* Every push and pull request is verified (lint, types, tests, migration
+  round-trip) with no secrets and no network-dependent tests.
+* The one unavoidable live step is explicit, bounded, sanitized, and
+  approval-gated.
+
+#### Negative
+
+* CI availability depends on GitHub Actions being enabled for the
+  repository/workspace; if it is disabled, the workflow file is inert.
+* The live validation remains environment-dependent (the chosen Article and
+  the provider must be reachable at validation time).
+
+### Revisit When
+
+Revisit if a second source or provider is added (CI matrix), if Actions is
+unavailable (document an alternative local gate), or if Phase 2 introduces
+authenticated/multi-user surfaces that change the threat boundary.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -2065,6 +2164,7 @@ submission features.
 | ADR-022 | Structured Learning Note generation through OpenAI Responses | Accepted |
 | ADR-023 | Synchronous idempotent processing pipeline with ordered persistence and reconciliation | Accepted |
 | ADR-024 | Server-rendered read-only dashboard with an application query service | Accepted |
+| ADR-025 | Phase 1 automated verification and controlled live validation | Accepted |
 
 ---
 
