@@ -1,12 +1,38 @@
 # CurrentMind
 
-CurrentMind is a personal learning system that converts UPSC current affairs
-articles into structured, exam-oriented Learning Notes.
+CurrentMind is a **local, personal** learning system that converts UPSC
+current-affairs articles into structured, exam-oriented Learning Notes. It
+discovers current-affairs articles, extracts their text, generates a
+structured Learning Note with an LLM, persists everything locally in SQLite,
+and displays it through a read-only web dashboard.
 
-Phase 1 builds a single end-to-end pipeline for one source (Indian Express
-UPSC Current Affairs): RSS discovery → article extraction → LLM analysis →
-local storage → web dashboard. See `docs/PRD.md`, `docs/ENGINEERING_SPEC.md`,
-and `docs/ROADMAP.md` for the full product and engineering plan.
+**Who it is for:** an individual UPSC (or similar competitive-exam) aspirant
+running the tool on their own machine. The goal is to spend less time making
+current-affairs notes by hand and more time studying structured, revisable
+knowledge — not to build a news reader.
+
+## Phase 1 features
+
+* Indian Express UPSC Current Affairs **RSS discovery**.
+* **Article extraction** (Trafilatura).
+* **Structured Learning Notes** generated via the OpenAI Responses API.
+* **SQLite persistence** (schema managed by Alembic).
+* **Duplicate protection** enforced by database unique constraints.
+* **Idempotent processing** — re-running never re-analyzes completed articles.
+* **Targeted retry** for failed articles (in-feed and off-feed).
+* A **read-only, server-rendered dashboard**.
+
+Phase 1 is a single end-to-end pipeline for one source: RSS discovery →
+article extraction → LLM analysis → local storage → web dashboard.
+
+## Documentation
+
+* `docs/PRD.md`, `docs/ENGINEERING_SPEC.md`, `docs/ROADMAP.md` — product and
+  engineering plan.
+* `docs/ARCHITECTURE.md` — system-level architecture overview.
+* `docs/PROMPTS.md` — prompt versioning and the structured-output contract.
+* `docs/DECISIONS.md` — architectural decision records (ADR-001 … ADR-025).
+* `docs/RELEASE_CHECKLIST.md` — Phase 1 release verification checklist.
 
 ## Current Status
 
@@ -295,17 +321,26 @@ Key behaviour:
 
 ## Requirements
 
-* Python 3.12
-* [uv](https://docs.astral.sh/uv/) for dependency and environment management
+* **Python 3.12 or later** (the repository pins `3.12` via `.python-version`).
+* [uv](https://docs.astral.sh/uv/) for dependency and environment management.
+* Local filesystem access (SQLite database + logs).
+* An **OpenAI API key — for processing only**. The dashboard does not need an
+  OpenAI key; it only reads the local database.
 
 ## Installation
 
 ```bash
-uv sync
+git clone <repository-url>
+cd currentMind
+uv sync --frozen
+cp .env.example .env
 ```
 
-This creates a `.venv` and installs runtime and development dependencies from
-`pyproject.toml` / `uv.lock`.
+`uv sync --frozen` installs the exact locked runtime and development
+dependencies from `pyproject.toml` / `uv.lock` into a `.venv` without
+modifying the lockfile. (`uv sync` without `--frozen` is also fine for local
+development.) Do **not** put a real API key in a committed file — edit your
+local `.env` only.
 
 If you prefer not to use `uv`, you can instead create a virtual environment
 and install the project in editable mode with `pip`:
@@ -324,21 +359,25 @@ Copy the example environment file and adjust values as needed:
 cp .env.example .env
 ```
 
-| Variable          | Purpose                                              |
-| ----------------- | ----------------------------------------------------- |
-| `OPENAI_API_KEY`  | API key for `OpenAILearningNoteGenerator` (not wired to application startup until a later sprint) |
-| `DATABASE_URL`    | SQLite database location                               |
-| `RSS_URL`         | Indian Express UPSC Current Affairs feed URL           |
-| `LOG_LEVEL`       | Logging verbosity (e.g. `INFO`, `DEBUG`)               |
-| `LLM_MODEL`       | LLM model identifier for `OpenAILearningNoteGenerator` (not wired to application startup until a later sprint) |
+| Variable         | Required for | Default | Notes |
+| ---------------- | ------------ | ------- | ----- |
+| `OPENAI_API_KEY` | processing   | none    | Needed by `process-feed` / `retry-article`. **Not** needed by the dashboard. |
+| `LLM_MODEL`      | processing   | none    | LLM model identifier. **Not** needed by the dashboard. |
+| `DATABASE_URL`   | processing + dashboard | `sqlite:///./database/currentmind.db` | The only variable the dashboard needs. |
+| `RSS_URL`        | processing   | Indian Express UPSC Current Affairs feed | Feed to discover. |
+| `LOG_LEVEL`      | optional     | `INFO`  | Logging verbosity (e.g. `INFO`, `DEBUG`). |
 
-Never commit a real `.env` file.
+`.env.example` is **secret-free**: it lists every supported variable with safe
+defaults or empty placeholders, and contains no real credentials. Copy it to
+`.env` and fill in your own values. **Never commit a real `.env` file** (it is
+git-ignored).
 
 ## Database Setup
 
-The database schema is managed by Alembic. Apply the migration to create the
-local SQLite database (using `DATABASE_URL` from `.env`, defaulting to
-`sqlite:///./database/currentmind.db`):
+Alembic is the **sole schema authority** — there is no `create_all()` path in
+the application, so the tables exist only after you run the migration. Apply
+the migration to create the local SQLite database (using `DATABASE_URL` from
+`.env`, defaulting to `sqlite:///./database/currentmind.db`):
 
 ```bash
 uv run alembic upgrade head
@@ -401,10 +440,41 @@ articles still present in the feed window, while `retry-article` operates
 purely on persisted state.
 
 Exit codes: `0` for a completed command with no article-level failures; `1`
-for a configuration failure, feed-discovery failure, unknown article id,
-database failure, or one or more article-level failures. The command prints
-summary counts and safe failure details (stage, category, message,
-identifiers) — never article text or provider output.
+for a configuration failure (missing `OPENAI_API_KEY` / `LLM_MODEL`), a
+feed-discovery failure, an unknown or malformed article id, a database
+unavailable/unmigrated failure, or one or more per-article failures. The
+command prints summary counts and safe failure details (stage, category,
+message, identifiers) — never article text or provider output.
+
+### Timeouts and retries
+
+The current defaults are fixed:
+
+| Stage | Request timeout | Retries |
+| ----- | --------------- | ------- |
+| RSS fetch | 10 s | none |
+| Article extraction | 10 s | none |
+| OpenAI request | 60 s | SDK transport retries (2) |
+| Structured-output validation | — | up to 3 application attempts |
+
+These are distinct mechanisms and should not be conflated:
+
+* **SDK transport retry** — the OpenAI SDK may retry an individual request on
+  transient transport errors; this is the SDK's own concern.
+* **Application validation attempt** — up to three structured-output attempts
+  (one original plus up to two repairs), triggered only by a schema
+  `ValidationError` or a completed response with no parsed content. Refusals
+  and provider-status failures are **not** application-retried.
+* **Insert-race recovery** — a one-time re-read after a duplicate-insert race.
+* **Reconciliation** — an interrupted run is healed on the next run from
+  persisted ground truth (no regeneration).
+* **Manual retry** — the operator-triggered `--retry-failed` /
+  `retry-article` commands above.
+
+Because the SDK applies its own retry backoff, the total wall-clock time of a
+single article's analysis may exceed a simple multiplication of the 60-second
+timeout; there is no guaranteed fixed upper bound. Validation repair is
+nonetheless bounded to three attempts.
 
 ## Starting the Dashboard
 
@@ -421,13 +491,19 @@ Open the dashboard at:
 * `http://127.0.0.1:8000/articles/<article-uuid>` — one article's full
   Learning Note.
 
-The dashboard is **read-only**: visiting it never processes the feed, calls
-OpenAI, or writes to the database. Processing remains a separate, manually run
-CLI operation (`uv run python -m app.cli process-feed`); there is no scheduler
-and no automatic processing. The dashboard requires only `DATABASE_URL` (not
-`OPENAI_API_KEY`/`LLM_MODEL`), and no authentication. If the database is
-missing or unmigrated, pages return a safe "temporarily unavailable" response
-rather than an error trace.
+The dashboard is **read-only**: visiting it never processes the feed, and its
+routes never call RSS or OpenAI or write to the database. Processing remains a
+separate, manually run CLI operation (`uv run python -m app.cli process-feed`);
+there is no scheduler and no automatic processing. The dashboard requires only
+`DATABASE_URL` (not `OPENAI_API_KEY`/`LLM_MODEL`). If the database is missing
+or unmigrated, pages return a safe "temporarily unavailable" response rather
+than an error trace.
+
+**This dashboard is for local, single-user use only.** It has **no
+authentication** and is **not hardened for public internet exposure** — do not
+expose it to untrusted networks. `--reload` is a development convenience;
+omit it for ordinary local use. By default `uvicorn` binds `127.0.0.1`
+(localhost).
 
 Optional filters (by GS paper, processing status, or keyword) are deferred:
 the required pages are complete without them, and none needs a new repository
@@ -446,8 +522,38 @@ uv run ruff check .
 uv run mypy .
 ```
 
+## Troubleshooting
+
+| Symptom | Likely cause and fix |
+| ------- | -------------------- |
+| `uv: command not found` | `uv` is not installed. Install it (see the [uv docs](https://docs.astral.sh/uv/)) and re-run. |
+| Python version error on `uv sync` | Python 3.12+ is required (`.python-version` pins `3.12`). Install it or point `uv` at a 3.12 interpreter. |
+| Settings load fails / values missing | No `.env` present. `cp .env.example .env` and fill in values. |
+| `OPENAI_API_KEY is required` | Set `OPENAI_API_KEY` in your environment or `.env` (needed only for `process-feed` / `retry-article`). |
+| `LLM_MODEL is required` | Set `LLM_MODEL` (the model identifier). |
+| Database-directory error | The `database/` directory must exist (it is committed with a `.gitkeep`). Recreate it if deleted. |
+| "Database unavailable or schema not initialized" | The database is missing or unmigrated. Run `uv run alembic upgrade head`. |
+| Feed discovery failed | The RSS feed is unavailable or `RSS_URL` is wrong/unreachable. Verify `RSS_URL` and network/feed availability, then retry. |
+| Malformed RSS response | The feed returned unparseable content. `process-feed` fails safely with a fixed message; retry later. |
+| An article shows `Failed` with `extraction: insufficient content` | The page had too little extractable text. Not all pages extract cleanly; the article is preserved and can be retried. |
+| An article shows `Failed` with `analysis: provider failure` | A provider/transport error occurred. Retry with `retry-article <UUID>` (or `process-feed --retry-failed` if still in the feed). |
+| An article shows `Failed` with `analysis: validation exhausted` | Structured output failed validation three times. Retry as above; persistent failures may indicate an unsuitable article. |
+| Retrying a failed article | Use `process-feed --retry-failed` for articles still in the feed window, or `retry-article <ARTICLE_UUID>` for one that has dropped out. |
+| Dashboard shows "temporarily unavailable" (HTTP 503) | The database read failed (missing/unmigrated/unavailable). Run `uv run alembic upgrade head` and confirm `DATABASE_URL`. |
+| Dashboard returns 422 for an article URL | The URL path is not a valid UUID. Use a real article UUID from the home page. |
+| Stale remote branches after a `git push --delete` returns HTTP 403 | Branch deletion may be disallowed for your account. This is not an error in the merge; leave the branch or ask a repository admin to remove it. Do not force anything. |
+| Resetting a local database | **First confirm `DATABASE_URL`**, then delete only that known disposable/local file (e.g. the default `./database/currentmind.db`), and re-run `uv run alembic upgrade head`. **Never blindly delete a database at an unknown path.** |
+
 ## Known Limitations
 
+* There is only **one source** (Indian Express UPSC Current Affairs) and no
+  multi-source abstraction in Phase 1.
+* Generated Learning Notes are **not independently fact-verified** — there is
+  no web verification or retrieval step, so a note may contain model error and
+  should be reviewed before you rely on it (see `docs/PROMPTS.md`).
+* CurrentMind is intended for **local, single-user use** and is **not hardened
+  for public internet exposure** (no authentication, no TLS, no
+  authorization).
 * There is no automatic scheduling or background processing — `process-feed`
   is run manually, and the dashboard never triggers it.
 * The dashboard is read-only and has no filters or pagination: the home page
