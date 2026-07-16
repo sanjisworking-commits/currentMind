@@ -1,0 +1,31 @@
+{% macro status_badge(status) %}
+{%- set presentation = status_presentation(status) -%}
+<span class="status-badge {{ presentation.css_class }}">{{ presentation.label }}</span>
+{%- endmacro %}
+
+{% macro tag_list(tags) %}
+{%- if tags %}
+<ul class="tag-list">
+  {% for tag in tags %}<li class="tag">{{ tag }}</li>{% endfor %}
+</ul>
+{%- endif %}
+{%- endmacro %}
+
+{% macro gs_paper_badges(gs_papers) %}
+{%- if gs_papers %}
+<ul class="gs-paper-list">
+  {% for paper in gs_papers %}<li class="gs-paper">{{ paper.value | upper }}</li>{% endfor %}
+</ul>
+{%- endif %}
+{%- endmacro %}
+
+{% macro bullet_section(heading, items) %}
+{%- if items %}
+<section class="note-section">
+  <h2>{{ heading }}</h2>
+  <ul class="note-list">
+    {% for item in items %}<li>{{ item }}</li>{% endfor %}
+  </ul>
+</section>
+{%- endif %}
+{%- endmacro %}

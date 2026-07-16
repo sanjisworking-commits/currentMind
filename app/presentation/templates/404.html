@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}Article not found · CurrentMind{% endblock %}
+
+{% block content %}
+  <h1>Article not found</h1>
+  <p>The article you requested does not exist.</p>
+  <p><a href="{{ url_for('home') }}">Return to recent articles</a></p>
+{% endblock %}

@@ -1902,6 +1902,141 @@ articles.
 
 ---
 
+## ADR-024: Server-Rendered Read-Only Dashboard with an Application Query Service
+
+**Status:** Accepted
+**Date:** 2026-07-15
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Sprint 7 adds the Phase 1 dashboard: two pages for browsing processed
+Articles and their Learning Notes. ADR-013 already settled that the dashboard
+is server-rendered rather than an SPA; this decision fills in how - the query
+boundary, the read models, the rendering stack, dependency wiring, and the
+safety boundary for displaying persisted content - without touching the
+processing pipeline, the schema, or the domain models.
+
+### Decision
+
+* **Server-side Jinja2 templates + one local CSS file, no JavaScript.**
+  `Jinja2Templates` renders `base.html`, `home.html`,
+  `article_detail.html`, and fixed `404.html`/`503.html`; `StaticFiles`
+  serves a single `dashboard.css`. No frontend build system, no CDN, no
+  external fonts/icons - the dashboard works fully offline. Prelims answers
+  use a native `<details>` disclosure, so no JavaScript is required.
+* **Read-only GET routes only.** `GET /` and `GET /articles/{article_id}`.
+  No POST/PUT/DELETE, no JSON API, no processing/retry/edit controls. No
+  dashboard request writes to the database or calls the pipeline, generator,
+  extractor, or source.
+* **An application query boundary.** `app/application/dashboard.py` defines a
+  `DashboardQuery` `Protocol` and a `DashboardQueryService` implementing it
+  structurally, depending only on the two repository ports and domain types -
+  no FastAPI/Starlette/Jinja2/SQLAlchemy import. Route functions handle HTTP;
+  the service handles reads and data-shape assembly; templates display only.
+* **Explicit, display-safe read models.** `ArticleCard` (home) and
+  `ArticleDetail` (detail) are immutable, slots-based, and expose only
+  display-safe fields. Neither carries `raw_text`; `ArticleDetail`
+  deliberately does *not* embed the full `Article` (which would expose
+  `raw_text` to the template environment), enumerating safe fields instead,
+  while reusing `LearningNote` directly because its structured content is the
+  detail page's subject.
+* **Bounded recent list, exact `1 + N` query model.** `HOME_ARTICLE_LIMIT =
+  30`. The home page issues one `list_recent(limit=30)` plus one
+  `get_by_article_id()` per returned Article (never
+  `get_with_learning_note()` per card, which would re-read each Article). The
+  detail page uses the already-bounded `get_with_learning_note()`. The N+1 is
+  accepted for a local single-user SQLite dashboard and its bound is asserted
+  by call-count tests. **Future batch-query trigger:** a materially larger
+  home limit or a measured latency problem would justify a single
+  `LEFT JOIN` batch repository method - not before.
+* **Factory injection.** `create_app(*, dashboard_query: DashboardQuery |
+  None = None)` accepts the Protocol so tests inject a fake; production builds
+  a real SQLite-backed service. The query object is stored on `app.state` and
+  retrieved via a small dependency. Building the engine/session factory opens
+  no connection, so app construction (and importing `main`) never requires a
+  live or migrated database, and needs only `DATABASE_URL` - not the
+  OpenAI/LLM settings. The first read against a missing/unmigrated database
+  surfaces as the safe 503 path.
+* **Autoescaping and a stored-content trust boundary.** Every persisted field
+  is treated as untrusted display content and rendered through Jinja2
+  autoescaping; no template uses `|safe`, `Markup`, or any raw-HTML/Markdown
+  path. The domain-validated Article URL is still escaped, rendered with
+  descriptive link text and `rel="noopener noreferrer"`, and never shown with
+  its query string as visible text.
+* **CWD-independent assets.** Template and static directories resolve from
+  `Path(__file__).resolve().parent`, so the dashboard works from any working
+  directory (a test changes `cwd` to prove it).
+* **Distinct error semantics.** A malformed UUID path is FastAPI's standard
+  422; a well-formed but absent Article is an HTML 404; a `RepositoryError`
+  during a read renders a fixed 503 page carrying no exception detail, SQL,
+  parameters, database URL, path, or traceback.
+* **No filters, no pagination, no authentication, no migration.** Optional
+  filters (status/GS-paper/keyword) are deferred - the required pages are
+  clean without any new repository contract, and none is an acceptance
+  requirement. The full table is never loaded. No schema change: existing
+  Article and Learning Note fields fully cover both pages.
+
+### Alternatives Considered
+
+1. `ArticleDetail = {article: Article, learning_note: ...}` (rejected - a full
+   `Article` exposes `raw_text` to templates; an explicit safe read model
+   removes that surface entirely).
+2. `get_with_learning_note()` per home card (rejected - it re-reads each
+   Article, converting the intended `1 + N` into `1 + 2N`).
+3. A batch `LEFT JOIN` repository method now (rejected - premature for
+   Phase-1 local scale; documented as a future trigger instead).
+4. Coercing a malformed UUID to 404 (rejected - 422 honestly distinguishes
+   "structurally invalid path" from "valid id, no such resource").
+5. Global FastAPI dependency overrides for test injection (rejected - factory
+   injection avoids global mutable state and needs no override machinery).
+6. Rendering the full summary on cards behind CSS line-clamp only (rejected -
+   a deterministic server-side excerpt bounds the HTML payload and keeps the
+   full summary for the detail page; CSS clamp remains a secondary safeguard).
+
+### Rationale
+
+The query-service boundary keeps FastAPI and SQLAlchemy out of both the
+templates and the application layer, matching the port pattern used since
+ADR-019, so the dashboard reads are unit-testable with plain fakes and the
+templates only ever see safe, immutable value objects. Excluding `raw_text`
+structurally (rather than by template discipline) makes the privacy boundary
+impossible to breach by a future template edit. The bounded `1 + N` read is
+the simplest correct implementation at Phase-1 scale and is honestly measured
+rather than hidden.
+
+### Consequences
+
+#### Positive
+
+* Dashboard reads are provider- and database-free to unit-test; one real
+  SQLite integration layer covers the end-to-end path.
+* No dashboard request can write, call the pipeline, or leak `raw_text`,
+  provider output, or database detail.
+* App construction never needs a live database or OpenAI configuration, so a
+  fresh checkout can serve `/health` and render the safe 503 before any data
+  exists.
+
+#### Negative
+
+* The home page issues up to 31 small queries per load; acceptable now but a
+  documented future refactor trigger.
+* A new direct dependency (`jinja2>=3.1,<4.0`) is added - the only Sprint 7
+  dependency change.
+* Two read models duplicate a few field names from the domain models; the
+  cost is accepted to keep `raw_text` and ORM state out of the template
+  environment.
+
+### Revisit When
+
+Revisit the `1 + N` decision when the home limit grows materially or a
+latency problem is measured (then add the batch `LEFT JOIN` method). Revisit
+the no-filters decision when a concrete filtering acceptance requirement
+appears. Revisit the read-only scope only when Phase 2 introduces editing or
+submission features.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -1929,6 +2064,7 @@ articles.
 | ADR-021 | SQLite persistence via application repository ports and explicit domain/ORM mapping | Accepted |
 | ADR-022 | Structured Learning Note generation through OpenAI Responses | Accepted |
 | ADR-023 | Synchronous idempotent processing pipeline with ordered persistence and reconciliation | Accepted |
+| ADR-024 | Server-rendered read-only dashboard with an application query service | Accepted |
 
 ---
 
