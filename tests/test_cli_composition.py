@@ -1,17 +1,41 @@
 """Tests for provider selection in the CLI composition root (`_build_generator`).
 
 These exercise the real `app.cli._build_generator` against a real `Settings`
-instance sourced from environment variables, with the two concrete generator
-constructors monkeypatched to recorders. No SDK client is constructed, no
-database is touched, and no external service is contacted: the recorders prove
-which adapter was selected, the model name and provider key passed to it, and
-that the unselected provider was never constructed.
+instance, with the two concrete generator constructors monkeypatched to
+recorders. No SDK client is constructed, no database is touched, and no external
+service is contacted: the recorders prove which adapter was selected, the model
+name and provider key passed to it, and that the unselected provider was never
+constructed.
+
+**Dotenv loading is explicitly disabled.** `Settings` is normally configured to
+read the repository's `.env`, so an untracked developer `.env` could otherwise
+change `LLM_PROVIDER` (or the keys) under these tests. Every `Settings` here is
+built via `_settings_without_dotenv()` (`_env_file=None`), so the tests read
+*only* the environment variables installed through `monkeypatch` - never a
+`.env`, the current working directory, a developer's provider selection, or a
+developer's real keys.
 """
+
+from pathlib import Path
 
 import pytest
 
 import app.cli as cli
 from app.infrastructure.config import Settings
+
+
+def _settings_without_dotenv() -> Settings:
+    """Build `Settings` with dotenv loading disabled.
+
+    Passing `_env_file=None` overrides the model's configured `.env` file so the
+    resulting settings are sourced only from process environment variables (and
+    field defaults) - making these tests independent of any local `.env`.
+    """
+    # `_env_file` is a real pydantic-settings `BaseSettings.__init__` argument
+    # (it disables dotenv loading at runtime, verified in this module's tests),
+    # but it is not part of the field-only `__init__` signature the type checker
+    # synthesizes for the model - hence the targeted ignore.
+    return Settings(_env_file=None)  # type: ignore[call-arg]
 
 
 class _Recorder:
@@ -62,7 +86,7 @@ def test_default_provider_selects_openai(monkeypatch: pytest.MonkeyPatch) -> Non
     openai_recorder, anthropic_recorder = _patch_generators(monkeypatch)
     _prepare_env(monkeypatch, provider=None)
 
-    cli._build_generator(Settings())
+    cli._build_generator(_settings_without_dotenv())
 
     assert len(openai_recorder.calls) == 1
     assert openai_recorder.calls[0] == {"model_name": "the-model", "api_key": "sk-openai-not-real"}
@@ -73,7 +97,7 @@ def test_explicit_openai_selects_openai(monkeypatch: pytest.MonkeyPatch) -> None
     openai_recorder, anthropic_recorder = _patch_generators(monkeypatch)
     _prepare_env(monkeypatch, provider="openai")
 
-    cli._build_generator(Settings())
+    cli._build_generator(_settings_without_dotenv())
 
     assert len(openai_recorder.calls) == 1
     assert anthropic_recorder.calls == []
@@ -83,7 +107,7 @@ def test_explicit_anthropic_selects_anthropic(monkeypatch: pytest.MonkeyPatch) -
     openai_recorder, anthropic_recorder = _patch_generators(monkeypatch)
     _prepare_env(monkeypatch, provider="anthropic")
 
-    cli._build_generator(Settings())
+    cli._build_generator(_settings_without_dotenv())
 
     assert len(anthropic_recorder.calls) == 1
     assert anthropic_recorder.calls[0] == {
@@ -108,7 +132,7 @@ def test_provider_value_is_normalized_for_whitespace_and_case(
     openai_recorder, anthropic_recorder = _patch_generators(monkeypatch)
     _prepare_env(monkeypatch, provider=raw_provider)
 
-    cli._build_generator(Settings())
+    cli._build_generator(_settings_without_dotenv())
 
     if expected == "anthropic":
         assert len(anthropic_recorder.calls) == 1
@@ -127,7 +151,7 @@ def test_llm_provider_alone_determines_adapter_when_both_keys_present(
         monkeypatch, provider="anthropic", openai_key="sk-openai-set", anthropic_key="sk-ant-set"
     )
 
-    cli._build_generator(Settings())
+    cli._build_generator(_settings_without_dotenv())
 
     assert len(anthropic_recorder.calls) == 1
     assert anthropic_recorder.calls[0]["api_key"] == "sk-ant-set"
@@ -142,7 +166,7 @@ def test_openai_requires_openai_api_key(monkeypatch: pytest.MonkeyPatch) -> None
     _prepare_env(monkeypatch, provider="openai", openai_key="")
 
     with pytest.raises(cli.CompositionError, match="OPENAI_API_KEY is required"):
-        cli._build_generator(Settings())
+        cli._build_generator(_settings_without_dotenv())
     assert openai_recorder.calls == []
     assert anthropic_recorder.calls == []
 
@@ -151,7 +175,7 @@ def test_openai_does_not_require_anthropic_api_key(monkeypatch: pytest.MonkeyPat
     openai_recorder, anthropic_recorder = _patch_generators(monkeypatch)
     _prepare_env(monkeypatch, provider="openai", anthropic_key="")
 
-    cli._build_generator(Settings())
+    cli._build_generator(_settings_without_dotenv())
 
     assert len(openai_recorder.calls) == 1
     assert anthropic_recorder.calls == []
@@ -162,7 +186,7 @@ def test_anthropic_requires_anthropic_api_key(monkeypatch: pytest.MonkeyPatch) -
     _prepare_env(monkeypatch, provider="anthropic", anthropic_key="")
 
     with pytest.raises(cli.CompositionError, match="ANTHROPIC_API_KEY is required"):
-        cli._build_generator(Settings())
+        cli._build_generator(_settings_without_dotenv())
     assert anthropic_recorder.calls == []
     assert openai_recorder.calls == []
 
@@ -171,7 +195,7 @@ def test_anthropic_does_not_require_openai_api_key(monkeypatch: pytest.MonkeyPat
     openai_recorder, anthropic_recorder = _patch_generators(monkeypatch)
     _prepare_env(monkeypatch, provider="anthropic", openai_key="")
 
-    cli._build_generator(Settings())
+    cli._build_generator(_settings_without_dotenv())
 
     assert len(anthropic_recorder.calls) == 1
     assert openai_recorder.calls == []
@@ -185,7 +209,7 @@ def test_both_providers_require_llm_model(
     _prepare_env(monkeypatch, provider=provider, model="")
 
     with pytest.raises(cli.CompositionError, match="LLM_MODEL is required"):
-        cli._build_generator(Settings())
+        cli._build_generator(_settings_without_dotenv())
     assert openai_recorder.calls == []
     assert anthropic_recorder.calls == []
 
@@ -200,7 +224,7 @@ def test_unknown_provider_raises_safe_actionable_error_and_constructs_nothing(
     _prepare_env(monkeypatch, provider="gemini")
 
     with pytest.raises(cli.CompositionError) as excinfo:
-        cli._build_generator(Settings())
+        cli._build_generator(_settings_without_dotenv())
 
     message = str(excinfo.value)
     assert "gemini" in message
@@ -211,3 +235,49 @@ def test_unknown_provider_raises_safe_actionable_error_and_constructs_nothing(
     # service, so a clean rejection here proves no external effect occurs.
     assert openai_recorder.calls == []
     assert anthropic_recorder.calls == []
+
+
+# --- dotenv isolation regression ---------------------------------------------
+
+
+def test_helper_ignores_a_conflicting_dotenv_in_the_working_directory(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A `.env` in the working directory must not influence these tests.
+
+    With a `.env` that selects `anthropic` sitting in the current working
+    directory and `LLM_PROVIDER` unset in the environment,
+    `_settings_without_dotenv()` must still resolve the built-in default
+    (`openai`) - proving dotenv loading is disabled and only monkeypatched
+    environment variables (and field defaults) are read.
+    """
+    (tmp_path / ".env").write_text(
+        "LLM_PROVIDER=anthropic\nANTHROPIC_API_KEY=sk-ant-from-dotenv\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    openai_recorder, anthropic_recorder = _patch_generators(monkeypatch)
+    # LLM_PROVIDER deliberately unset in the environment; only the .env sets it.
+    _prepare_env(monkeypatch, provider=None)
+
+    cli._build_generator(_settings_without_dotenv())
+
+    # The default (openai) wins, not the .env's anthropic - dotenv was ignored.
+    assert len(openai_recorder.calls) == 1
+    assert anthropic_recorder.calls == []
+
+
+def test_settings_would_read_dotenv_without_the_isolation_helper(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Control case: proves the `.env` in the working directory is real and
+    would otherwise be read - so the isolation in the test above is meaningful,
+    not vacuous. A plain `Settings()` (dotenv enabled) picks up the file, while
+    `_settings_without_dotenv()` does not.
+    """
+    (tmp_path / ".env").write_text("LLM_PROVIDER=anthropic\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+
+    assert Settings().llm_provider == "anthropic"  # dotenv-enabled reads the file
+    assert _settings_without_dotenv().llm_provider == "openai"  # isolated: default
