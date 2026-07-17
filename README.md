@@ -359,13 +359,15 @@ Copy the example environment file and adjust values as needed:
 cp .env.example .env
 ```
 
-| Variable         | Required for | Default | Notes |
-| ---------------- | ------------ | ------- | ----- |
-| `OPENAI_API_KEY` | processing   | none    | Needed by `process-feed` / `retry-article`. **Not** needed by the dashboard. |
-| `LLM_MODEL`      | processing   | none    | LLM model identifier. **Not** needed by the dashboard. |
-| `DATABASE_URL`   | processing + dashboard | `sqlite:///./database/currentmind.db` | The only variable the dashboard needs. |
-| `RSS_URL`        | processing   | Indian Express UPSC Current Affairs feed | Feed to discover. |
-| `LOG_LEVEL`      | optional     | `INFO`  | Logging verbosity (e.g. `INFO`, `DEBUG`). |
+| Variable            | Required for | Default | Notes |
+| ------------------- | ------------ | ------- | ----- |
+| `LLM_PROVIDER`      | processing   | `openai` | Learning Note generator: `openai` or `anthropic`. Selects which API key is required. **Not** needed by the dashboard. |
+| `OPENAI_API_KEY`    | processing (openai) | none | Needed by `process-feed` / `retry-article` when `LLM_PROVIDER=openai`. **Not** needed by the dashboard. |
+| `ANTHROPIC_API_KEY` | processing (anthropic) | none | Needed by `process-feed` / `retry-article` when `LLM_PROVIDER=anthropic`. **Not** needed by the dashboard. |
+| `LLM_MODEL`         | processing   | none    | Model identifier for the selected provider (e.g. `gpt-4o-mini`, `claude-haiku-4-5`). **Not** needed by the dashboard. |
+| `DATABASE_URL`      | processing + dashboard | `sqlite:///./database/currentmind.db` | The only variable the dashboard needs. |
+| `RSS_URL`           | processing   | Indian Express UPSC Current Affairs feed | Feed to discover. |
+| `LOG_LEVEL`         | optional     | `INFO`  | Logging verbosity (e.g. `INFO`, `DEBUG`). |
 
 `.env.example` is **secret-free**: it lists every supported variable with safe
 defaults or empty placeholders, and contains no real credentials. Copy it to
@@ -529,8 +531,10 @@ uv run mypy .
 | `uv: command not found` | `uv` is not installed. Install it (see the [uv docs](https://docs.astral.sh/uv/)) and re-run. |
 | Python version error on `uv sync` | Python 3.12+ is required (`.python-version` pins `3.12`). Install it or point `uv` at a 3.12 interpreter. |
 | Settings load fails / values missing | No `.env` present. `cp .env.example .env` and fill in values. |
-| `OPENAI_API_KEY is required` | Set `OPENAI_API_KEY` in your environment or `.env` (needed only for `process-feed` / `retry-article`). |
-| `LLM_MODEL is required` | Set `LLM_MODEL` (the model identifier). |
+| `OPENAI_API_KEY is required` | Using `LLM_PROVIDER=openai` (the default): set `OPENAI_API_KEY` in your environment or `.env` (needed only for `process-feed` / `retry-article`). |
+| `ANTHROPIC_API_KEY is required` | Using `LLM_PROVIDER=anthropic`: set `ANTHROPIC_API_KEY` in your environment or `.env`. |
+| `Unknown LLM_PROVIDER ...` | Set `LLM_PROVIDER` to `openai` or `anthropic`. |
+| `LLM_MODEL is required` | Set `LLM_MODEL` (the model identifier for the selected provider). |
 | Database-directory error | The `database/` directory must exist (it is committed with a `.gitkeep`). Recreate it if deleted. |
 | "Database unavailable or schema not initialized" | The database is missing or unmigrated. Run `uv run alembic upgrade head`. |
 | Feed discovery failed | The RSS feed is unavailable or `RSS_URL` is wrong/unreachable. Verify `RSS_URL` and network/feed availability, then retry. |
@@ -616,8 +620,11 @@ uv run mypy .
   mis-extracted article could be rejected by the provider for exceeding the
   configured model's context length - this surfaces as a normal
   `LearningNoteProviderError`, not a crash, but is not retried.
-* OpenAI is the only supported provider; there is no Chat Completions
-  fallback and no multi-provider abstraction.
+* Two Learning Note providers are supported, selected by `LLM_PROVIDER`:
+  OpenAI (Responses API, default) and Anthropic (Messages API). Both go
+  through the same `LearningNoteGenerator` port, the same source-neutral
+  prompt files, and the same bounded validation-retry policy. There is no
+  OpenAI Chat Completions fallback, and only one provider is active per run.
 * Application-level retries are validation-only (a `pydantic.ValidationError`
   or a completed response with no parsed content), bounded at three total
   attempts. Transport-level retry is entirely the OpenAI SDK's own concern
