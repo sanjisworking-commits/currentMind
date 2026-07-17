@@ -2221,6 +2221,22 @@ guarantee, and lets a Claude-key user run the pipeline unchanged.
   `LLM_PROVIDER=anthropic` (e.g. `claude-haiku-4-5`); an incompatible model
   surfaces as a normal provider/validation error, not a crash.
 
+### Verification note
+
+The automated suite (unit tests for both adapters, provider-selection and
+client-construction tests, `ruff`, and strict `mypy`) is the gate for this
+change. During development the Anthropic path was also exercised by a single
+**ad hoc happy-path smoke run** — one real Article processed once with a real
+Anthropic key — purely to confirm the adapter talks to the live API. That smoke
+run is **not** the controlled Phase 1 release validation and does **not** close
+the Phase 1 acceptance criterion: it did not follow the full RELEASE_CHECKLIST
+§4 / ADR-025 procedure (documented localhost one-entry RSS wrapper, disposable
+database migrated from empty, verified persisted `ANALYZED` Article, dashboard
+inspection, idempotent second run producing no second Learning Note, a
+sanitized report, complete disposable-data cleanup, and the provider the
+release checklist requires). Phase 1 remains incomplete until that controlled
+validation is separately approved and executed.
+
 ### Revisit When
 
 Revisit if a third provider is added (extract shared helpers; consider a

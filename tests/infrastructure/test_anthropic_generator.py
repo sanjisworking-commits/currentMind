@@ -24,7 +24,10 @@ from app.application.learning_notes import LearningNoteProviderError, LearningNo
 from app.domain.article import Article
 from app.domain.enums import GSPaper, ProcessingStatus
 from app.domain.learning_note import LearningNoteContent
+from app.infrastructure import anthropic_generator
 from app.infrastructure.anthropic_generator import (
+    DEFAULT_SDK_MAX_RETRIES,
+    DEFAULT_TIMEOUT_SECONDS,
     MAX_VALIDATION_ATTEMPTS,
     AnthropicLearningNoteGenerator,
 )
@@ -263,6 +266,28 @@ def test_unexpected_stop_reason_produces_immediate_provider_error_with_no_retry(
     assert len(fake.calls) == 1
 
 
+def test_none_stop_reason_is_not_success_and_raises_safe_provider_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A `None` stop reason must never be accepted as a successful completion:
+    only `end_turn` is. Even if a parsed content object is somehow attached, a
+    missing stop reason is a provider outcome - it raises a safe
+    `LearningNoteProviderError` immediately, makes exactly one call, is never
+    validation-retried, and never returns a Learning Note or leaks raw content.
+    """
+    sensitive_marker = "UNMISTAKABLE-ARTICLE-BODY-MARKER"
+    # `content` is attached deliberately to prove that even a parseable body
+    # does not turn a `None` stop reason into a success.
+    fake = FakeMessagesClient([make_parsed_message(stop_reason=None, content=_VALID_CONTENT)])
+    generator = AnthropicLearningNoteGenerator(model_name="claude-test", messages=fake)
+    with caplog.at_level(logging.INFO), pytest.raises(LearningNoteProviderError) as excinfo:
+        generator.generate(_make_article(raw_text=sensitive_marker))
+    assert "stop reason" in str(excinfo.value)
+    assert len(fake.calls) == 1
+    assert sensitive_marker not in str(excinfo.value)
+    assert sensitive_marker not in caplog.text
+
+
 @pytest.mark.parametrize(
     "sdk_error_factory",
     [
@@ -309,6 +334,80 @@ def test_logs_do_not_contain_api_key(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO):
         generator.generate(_make_article())
     assert "sk-ant-" not in caplog.text
+
+
+# --- real Anthropic-client construction seam ----------------------------------
+
+
+class _RecordingAnthropicClient:
+    """Stand-in for `anthropic.Anthropic`: records constructor kwargs and
+    exposes a `.messages` resource the adapter must store and use.
+    """
+
+    def __init__(self, *, messages: FakeMessagesClient, **kwargs: object) -> None:
+        self.constructor_kwargs = kwargs
+        self.messages = messages
+
+
+def test_constructs_real_anthropic_client_with_expected_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When given an `api_key`, the adapter must build the real `Anthropic`
+    client with the fixed timeout and SDK transport-retry policy, and use the
+    client's `.messages` resource for generation.
+    """
+    scripted = FakeMessagesClient([make_parsed_message(content=_VALID_CONTENT)])
+    captured: dict[str, object] = {}
+
+    def _fake_anthropic(**kwargs: object) -> _RecordingAnthropicClient:
+        captured.update(kwargs)
+        return _RecordingAnthropicClient(messages=scripted, **kwargs)
+
+    monkeypatch.setattr(anthropic_generator, "Anthropic", _fake_anthropic)
+
+    generator = AnthropicLearningNoteGenerator(
+        model_name="claude-configured", api_key="ANTHROPIC-KEY-MARKER-9x7"
+    )
+
+    assert captured["api_key"] == "ANTHROPIC-KEY-MARKER-9x7"
+    assert captured["timeout"] == DEFAULT_TIMEOUT_SECONDS == 60.0
+    assert captured["max_retries"] == DEFAULT_SDK_MAX_RETRIES == 2
+
+    # The adapter must actually use the constructed client's `.messages`.
+    note = generator.generate(_make_article())
+    assert note.model_name == "claude-configured"
+    assert len(scripted.calls) == 1
+
+
+def test_api_key_never_leaks_through_the_real_client_path(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The API key travels through the real `api_key=` construction path (not
+    the injected test seam). Even when the provider then fails, the key must
+    never appear in logs or in the user-facing exception.
+    """
+    marker = "ANTHROPIC-KEY-SECRET-MARKER-42"
+    failing = FakeMessagesClient(
+        [
+            AuthenticationError(
+                "invalid api key",
+                response=httpx.Response(401, request=_auth_request()),
+                body=None,
+            )
+        ]
+    )
+
+    def _fake_anthropic(**kwargs: object) -> _RecordingAnthropicClient:
+        return _RecordingAnthropicClient(messages=failing, **kwargs)
+
+    monkeypatch.setattr(anthropic_generator, "Anthropic", _fake_anthropic)
+
+    generator = AnthropicLearningNoteGenerator(model_name="claude-test", api_key=marker)
+    with caplog.at_level(logging.INFO), pytest.raises(LearningNoteProviderError) as excinfo:
+        generator.generate(_make_article())
+
+    assert marker not in caplog.text
+    assert marker not in str(excinfo.value)
 
 
 def test_logs_do_not_contain_rejected_pydantic_input_values(

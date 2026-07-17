@@ -250,11 +250,15 @@ class AnthropicLearningNoteGenerator:
                 )
                 raise LearningNoteProviderError("incomplete response: max_output_tokens")
 
-            if stop_reason not in ("end_turn", None):
-                # `tool_use` / `pause_turn` / `stop_sequence` are not expected
-                # for this tool-free, single-message request. Handle them
-                # explicitly as provider outcomes rather than falling through
-                # into the "no parsed content" retry path.
+            if stop_reason != "end_turn":
+                # `end_turn` is the ONLY accepted normal-completion signal for
+                # this tool-free, single-message request. `tool_use`,
+                # `pause_turn`, `stop_sequence`, a missing `None`, and any
+                # future/unknown value are all treated as provider outcomes and
+                # rejected immediately - never accepted as success and never
+                # falling through into the "no parsed content" retry path. This
+                # allowlist-of-one keeps the check safe against SDK stop-reason
+                # values added after this code was written.
                 logger.error(
                     "learning note response unexpected stop reason article_id=%s attempt=%d "
                     "stop_reason=%s",
