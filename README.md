@@ -15,7 +15,8 @@ knowledge — not to build a news reader.
 
 * Indian Express UPSC Current Affairs **RSS discovery**.
 * **Article extraction** (Trafilatura).
-* **Structured Learning Notes** generated via the OpenAI Responses API.
+* **Structured Learning Notes** generated via a pluggable LLM provider — the
+  OpenAI Responses API or the Anthropic Messages API, selected by `LLM_PROVIDER`.
 * **SQLite persistence** (schema managed by Alembic).
 * **Duplicate protection** enforced by database unique constraints.
 * **Idempotent processing** — re-running never re-analyzes completed articles.
@@ -31,7 +32,7 @@ article extraction → LLM analysis → local storage → web dashboard.
   engineering plan.
 * `docs/ARCHITECTURE.md` — system-level architecture overview.
 * `docs/PROMPTS.md` — prompt versioning and the structured-output contract.
-* `docs/DECISIONS.md` — architectural decision records (ADR-001 … ADR-025).
+* `docs/DECISIONS.md` — architectural decision records (ADR-001 … ADR-026).
 * `docs/RELEASE_CHECKLIST.md` — Phase 1 release verification checklist.
 
 ## Current Status
@@ -42,7 +43,7 @@ the core domain layer (`app/domain/`): `ArticleCandidate`, `Article`,
 `ExtractedArticle`, `LearningNote`, `PrelimsQuestion`, `MainsQuestion`, and
 the `ProcessingStatus`, `ExtractionStatus`, and `GSPaper` enums — all
 validated Pydantic models with no dependency on FastAPI, SQLAlchemy,
-feedparser, Trafilatura, or the OpenAI SDK.
+feedparser, Trafilatura, or any LLM provider SDK.
 
 Sprint 2 adds RSS discovery:
 
@@ -195,8 +196,16 @@ Sprint 5 adds structured LLM analysis:
   set.
 * `app/infrastructure/openai_generator.py` — `OpenAILearningNoteGenerator`,
   the OpenAI Responses API implementation of `LearningNoteGenerator`.
+* `app/infrastructure/anthropic_generator.py` — `AnthropicLearningNoteGenerator`,
+  the Anthropic Messages API implementation of the same `LearningNoteGenerator`
+  port (added later; see ADR-026). Both adapters share the source-neutral v1
+  prompts and the same three-attempt validation policy; the CLI composition
+  root selects between them by `LLM_PROVIDER`. The description below is written
+  around the OpenAI adapter; the Anthropic adapter mirrors it, substituting
+  `messages.parse(..., output_format=LearningNoteContent)` and the Anthropic
+  SDK's stop-reason/error model.
 * `prompts/learning_note_v1_system.txt` and `prompts/learning_note_v1_user.txt`
-  — the versioned system and user prompt templates.
+  — the versioned system and user prompt templates (shared by both providers).
 
 Key behaviour:
 
@@ -324,8 +333,11 @@ Key behaviour:
 * **Python 3.12 or later** (the repository pins `3.12` via `.python-version`).
 * [uv](https://docs.astral.sh/uv/) for dependency and environment management.
 * Local filesystem access (SQLite database + logs).
-* An **OpenAI API key — for processing only**. The dashboard does not need an
-  OpenAI key; it only reads the local database.
+* An **API key for the selected LLM provider — for processing only**. With
+  `LLM_PROVIDER=openai` (the default) that is `OPENAI_API_KEY`; with
+  `LLM_PROVIDER=anthropic` it is `ANTHROPIC_API_KEY`. Only the selected
+  provider's key is required. The dashboard needs neither provider key; it only
+  reads the local database.
 
 ## Installation
 
@@ -359,13 +371,15 @@ Copy the example environment file and adjust values as needed:
 cp .env.example .env
 ```
 
-| Variable         | Required for | Default | Notes |
-| ---------------- | ------------ | ------- | ----- |
-| `OPENAI_API_KEY` | processing   | none    | Needed by `process-feed` / `retry-article`. **Not** needed by the dashboard. |
-| `LLM_MODEL`      | processing   | none    | LLM model identifier. **Not** needed by the dashboard. |
-| `DATABASE_URL`   | processing + dashboard | `sqlite:///./database/currentmind.db` | The only variable the dashboard needs. |
-| `RSS_URL`        | processing   | Indian Express UPSC Current Affairs feed | Feed to discover. |
-| `LOG_LEVEL`      | optional     | `INFO`  | Logging verbosity (e.g. `INFO`, `DEBUG`). |
+| Variable            | Required for | Default | Notes |
+| ------------------- | ------------ | ------- | ----- |
+| `LLM_PROVIDER`      | processing   | `openai` | Learning Note generator: `openai` or `anthropic`. Selects which API key is required. **Not** needed by the dashboard. |
+| `OPENAI_API_KEY`    | processing (openai) | none | Needed by `process-feed` / `retry-article` when `LLM_PROVIDER=openai`. **Not** needed by the dashboard. |
+| `ANTHROPIC_API_KEY` | processing (anthropic) | none | Needed by `process-feed` / `retry-article` when `LLM_PROVIDER=anthropic`. **Not** needed by the dashboard. |
+| `LLM_MODEL`         | processing   | none    | Model identifier for the selected provider (e.g. `gpt-4o-mini`, `claude-haiku-4-5`). **Not** needed by the dashboard. |
+| `DATABASE_URL`      | processing + dashboard | `sqlite:///./database/currentmind.db` | The only variable the dashboard needs. |
+| `RSS_URL`           | processing   | Indian Express UPSC Current Affairs feed | Feed to discover. |
+| `LOG_LEVEL`         | optional     | `INFO`  | Logging verbosity (e.g. `INFO`, `DEBUG`). |
 
 `.env.example` is **secret-free**: it lists every supported variable with safe
 defaults or empty placeholders, and contains no real credentials. Copy it to
@@ -414,7 +428,9 @@ curl http://127.0.0.1:8000/health
 
 The database schema must exist first (`uv run alembic upgrade head` — the CLI
 never runs migrations automatically and fails with a clear message if the
-schema is missing). `OPENAI_API_KEY` and `LLM_MODEL` must be set.
+schema is missing). `LLM_MODEL` and the selected provider's API key must be set
+(`OPENAI_API_KEY` for `LLM_PROVIDER=openai`, `ANTHROPIC_API_KEY` for
+`LLM_PROVIDER=anthropic`).
 
 Process the current RSS feed window:
 
@@ -440,9 +456,11 @@ articles still present in the feed window, while `retry-article` operates
 purely on persisted state.
 
 Exit codes: `0` for a completed command with no article-level failures; `1`
-for a configuration failure (missing `OPENAI_API_KEY` / `LLM_MODEL`), a
-feed-discovery failure, an unknown or malformed article id, a database
-unavailable/unmigrated failure, or one or more per-article failures. The
+for a configuration failure (a missing provider-specific API key —
+`OPENAI_API_KEY` or `ANTHROPIC_API_KEY` for the selected provider — a missing
+`LLM_MODEL`, or an unknown `LLM_PROVIDER`), a feed-discovery failure, an unknown
+or malformed article id, a database unavailable/unmigrated failure, or one or
+more per-article failures. The
 command prints summary counts and safe failure details (stage, category,
 message, identifiers) — never article text or provider output.
 
@@ -454,17 +472,24 @@ The current defaults are fixed:
 | ----- | --------------- | ------- |
 | RSS fetch | 10 s | none |
 | Article extraction | 10 s | none |
-| OpenAI request | 60 s | SDK transport retries (2) |
+| LLM provider request | 60 s | selected SDK transport retries (2) |
 | Structured-output validation | — | up to 3 application attempts |
 
-These are distinct mechanisms and should not be conflated:
+Both provider adapters (OpenAI and Anthropic) use the same values: a
+60-second request timeout and two SDK transport retries. These are distinct
+mechanisms and should not be conflated:
 
-* **SDK transport retry** — the OpenAI SDK may retry an individual request on
-  transient transport errors; this is the SDK's own concern.
+* **SDK transport retry** — the selected provider SDK may retry an individual
+  request on transient transport errors; this is the SDK's own concern (two
+  retries by default, the same for both providers).
 * **Application validation attempt** — up to three structured-output attempts
   (one original plus up to two repairs), triggered only by a schema
   `ValidationError` or a completed response with no parsed content. Refusals
-  and provider-status failures are **not** application-retried.
+  and provider-status (provider-outcome) failures are **not**
+  application-retried, for either provider.
+* Total processing duration for one article has **no guaranteed fixed upper
+  bound** — it is bounded per request by the timeouts above, but the number of
+  requests (validation attempts × SDK transport retries) compounds.
 * **Insert-race recovery** — a one-time re-read after a duplicate-insert race.
 * **Reconciliation** — an interrupted run is healed on the next run from
   persisted ground truth (no regeneration).
@@ -529,8 +554,10 @@ uv run mypy .
 | `uv: command not found` | `uv` is not installed. Install it (see the [uv docs](https://docs.astral.sh/uv/)) and re-run. |
 | Python version error on `uv sync` | Python 3.12+ is required (`.python-version` pins `3.12`). Install it or point `uv` at a 3.12 interpreter. |
 | Settings load fails / values missing | No `.env` present. `cp .env.example .env` and fill in values. |
-| `OPENAI_API_KEY is required` | Set `OPENAI_API_KEY` in your environment or `.env` (needed only for `process-feed` / `retry-article`). |
-| `LLM_MODEL is required` | Set `LLM_MODEL` (the model identifier). |
+| `OPENAI_API_KEY is required` | Using `LLM_PROVIDER=openai` (the default): set `OPENAI_API_KEY` in your environment or `.env` (needed only for `process-feed` / `retry-article`). |
+| `ANTHROPIC_API_KEY is required` | Using `LLM_PROVIDER=anthropic`: set `ANTHROPIC_API_KEY` in your environment or `.env`. |
+| `Unknown LLM_PROVIDER ...` | Set `LLM_PROVIDER` to `openai` or `anthropic`. |
+| `LLM_MODEL is required` | Set `LLM_MODEL` (the model identifier for the selected provider). |
 | Database-directory error | The `database/` directory must exist (it is committed with a `.gitkeep`). Recreate it if deleted. |
 | "Database unavailable or schema not initialized" | The database is missing or unmigrated. Run `uv run alembic upgrade head`. |
 | Feed discovery failed | The RSS feed is unavailable or `RSS_URL` is wrong/unreachable. Verify `RSS_URL` and network/feed availability, then retry. |
@@ -607,19 +634,24 @@ uv run mypy .
 * `LearningNoteGenerator.generate()` itself remains workflow-unaware: it
   only reads `article.raw_text` and returns a `LearningNote`. All status
   transitions and persistence around it are owned by
-  `ProcessNewsFeedService`. No automated test makes a live OpenAI request —
-  the pipeline and CLI tests all use fakes and temporary databases.
-* `OpenAILearningNoteGenerator` does not truncate long extracted article
-  text. Real UPSC current-affairs articles are short-to-medium news pieces
-  well within typical model context windows, and truncation risks silently
+  `ProcessNewsFeedService`. No automated test makes a live OpenAI or Anthropic
+  request — the generator, pipeline, CLI, and composition tests all use
+  handwritten fakes and temporary databases.
+* Neither provider adapter (`OpenAILearningNoteGenerator`,
+  `AnthropicLearningNoteGenerator`) truncates long extracted article text.
+  Real UPSC current-affairs articles are short-to-medium news pieces well
+  within typical model context windows, and truncation risks silently
   discarding article content. The documented risk: an abnormally long or
-  mis-extracted article could be rejected by the provider for exceeding the
-  configured model's context length - this surfaces as a normal
+  mis-extracted article could be rejected by the selected provider for
+  exceeding the configured model's context length - this surfaces as a safe
   `LearningNoteProviderError`, not a crash, but is not retried.
-* OpenAI is the only supported provider; there is no Chat Completions
-  fallback and no multi-provider abstraction.
+* Two Learning Note providers are supported, selected by `LLM_PROVIDER`:
+  OpenAI (Responses API, default) and Anthropic (Messages API). Both go
+  through the same `LearningNoteGenerator` port, the same source-neutral
+  prompt files, and the same bounded validation-retry policy. There is no
+  OpenAI Chat Completions fallback, and only one provider is active per run.
 * Application-level retries are validation-only (a `pydantic.ValidationError`
   or a completed response with no parsed content), bounded at three total
-  attempts. Transport-level retry is entirely the OpenAI SDK's own concern
-  (`max_retries`, configured explicitly at client construction, default 2)
-  and is never duplicated by application code.
+  attempts, for both providers. Transport-level retry is entirely the selected
+  provider SDK's own concern (`max_retries`, configured explicitly at client
+  construction, default 2) and is never duplicated by application code.

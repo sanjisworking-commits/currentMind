@@ -2,7 +2,8 @@
 
 This module is the composition root: it is the only place that assembles the
 concrete infrastructure adapters (SQLite repositories, Indian Express RSS
-source, Trafilatura extractor, OpenAI generator) into a
+source, Trafilatura extractor, and the configured Learning Note generator -
+OpenAI or Anthropic, selected by `LLM_PROVIDER`) into a
 `ProcessNewsFeedService`. It never runs Alembic migrations itself - the
 schema must already exist (`uv run alembic upgrade head`).
 
@@ -21,6 +22,7 @@ import argparse
 import sys
 from uuid import UUID
 
+from app.application.learning_notes import LearningNoteGenerator
 from app.application.processing import (
     ArticleNotFoundError,
     ArticleProcessingResult,
@@ -29,6 +31,7 @@ from app.application.processing import (
 )
 from app.application.repositories import RepositoryError
 from app.application.sources import ArticleSourceError
+from app.infrastructure.anthropic_generator import AnthropicLearningNoteGenerator
 from app.infrastructure.config import Settings
 from app.infrastructure.database import create_engine_from_url, create_session_factory
 from app.infrastructure.logging import configure_logging
@@ -63,6 +66,34 @@ def _require_setting(value: str | None, name: str) -> str:
     return value
 
 
+def _build_generator(settings: Settings) -> LearningNoteGenerator:
+    """Select and construct the configured LLM generator adapter.
+
+    The provider is chosen by `LLM_PROVIDER` (default "openai"); each provider
+    requires its own API key. The model name (`LLM_MODEL`) is required for both.
+
+    Raises:
+        CompositionError: if the provider is unknown or a required key or
+            model name is missing.
+    """
+    provider = settings.llm_provider.strip().lower()
+    model_name = _require_setting(settings.llm_model, "LLM_MODEL")
+
+    if provider == "openai":
+        return OpenAILearningNoteGenerator(
+            model_name=model_name,
+            api_key=_require_setting(settings.openai_api_key, "OPENAI_API_KEY"),
+        )
+    if provider == "anthropic":
+        return AnthropicLearningNoteGenerator(
+            model_name=model_name,
+            api_key=_require_setting(settings.anthropic_api_key, "ANTHROPIC_API_KEY"),
+        )
+    raise CompositionError(
+        f"Unknown LLM_PROVIDER {provider!r}. Set LLM_PROVIDER to 'openai' or 'anthropic'."
+    )
+
+
 def _compose_service(settings: Settings) -> ProcessNewsFeedService:
     """Assemble the concrete processing service, verifying prerequisites.
 
@@ -70,8 +101,7 @@ def _compose_service(settings: Settings) -> ProcessNewsFeedService:
         CompositionError: if required configuration is missing, or the
             database is unavailable or not yet migrated.
     """
-    api_key = _require_setting(settings.openai_api_key, "OPENAI_API_KEY")
-    model_name = _require_setting(settings.llm_model, "LLM_MODEL")
+    learning_note_generator = _build_generator(settings)
 
     engine = create_engine_from_url(settings.database_url)
     session_factory = create_session_factory(engine)
@@ -87,9 +117,7 @@ def _compose_service(settings: Settings) -> ProcessNewsFeedService:
         article_extractor=TrafilaturaArticleExtractor(),
         article_repository=article_repository,
         learning_note_repository=learning_note_repository,
-        learning_note_generator=OpenAILearningNoteGenerator(
-            model_name=model_name, api_key=api_key
-        ),
+        learning_note_generator=learning_note_generator,
     )
 
 

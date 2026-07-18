@@ -11,15 +11,23 @@ behind the prompt architecture, see ADR-022.
 
 ## 1. Active version
 
-The active prompt version is **`v1`**, defined as a single source of truth:
+The active prompt version is **`v1`**. Both provider adapters define it and
+derive the same authoritative prompt filenames from it:
 
 ```python
 PROMPT_VERSION = "v1"   # app/infrastructure/openai_generator.py
+PROMPT_VERSION = "v1"   # app/infrastructure/anthropic_generator.py
 ```
 
-Both prompt filenames are derived from it, so bumping the version without
-adding the corresponding files fails immediately (a clear `FileNotFoundError`)
-rather than silently reusing stale prompts.
+Both prompt filenames are derived from this constant, so bumping the version
+without adding the corresponding files fails immediately (a clear
+`FileNotFoundError`) rather than silently reusing stale prompts. The two
+adapters share the same source-neutral prompt files and must keep the same
+`PROMPT_VERSION` value: the constant (and the small prompt-rendering helpers)
+are **intentionally duplicated** between the adapters rather than centralized
+(ADR-026), so the two definitions must remain aligned. This correction does not
+extract or centralize them; if a third provider is added, ADR-026 flags
+extracting the shared pieces then.
 
 ## 2. Authoritative prompt files
 
@@ -53,13 +61,20 @@ The system prompt contains no placeholders.
 
 ## 4. Relationship to `LearningNoteContent`
 
-The model is asked (via the OpenAI Responses API's native structured parsing,
-`responses.parse(..., text_format=LearningNoteContent)`) to return output
-matching `LearningNoteContent` exactly — the 15 AI-authored fields, every one
-required, with explicit empty lists where a category does not apply. Pydantic
-is the sole validator of model output; there is no manual JSON parsing. Trusted
-metadata is **not** part of `LearningNoteContent` and is supplied locally by
-`assemble_learning_note()`, so the model cannot influence it.
+The model is asked, via each provider's native structured-output parsing, to
+return output matching `LearningNoteContent` exactly — the 15 AI-authored
+fields, every one required, with explicit empty lists where a category does not
+apply. Both adapters bind the schema the same way:
+
+* OpenAI: `responses.parse(..., text_format=LearningNoteContent)`
+* Anthropic: `messages.parse(..., output_format=LearningNoteContent)`
+
+In both adapters **Pydantic is the sole validator** of model output (via each
+SDK's own `LearningNoteContent` validation); there is no manual JSON parsing,
+Markdown-fence stripping, or regex extraction in either. Trusted metadata is
+**not** part of `LearningNoteContent` and is supplied locally by
+`assemble_learning_note()` (shared application code), so the model cannot
+influence it regardless of provider.
 
 ## 5. Untrusted-input delimiters
 
@@ -74,14 +89,19 @@ mathematical guarantee (ADR-022).
 ## 6. Repair-attempt behavior
 
 Structured-output generation makes at most **three** application-level
-attempts: one original request plus up to two repair retries. A repair retry
-occurs only for a Pydantic `ValidationError` during parsing, or a completed,
-non-refusal response with no parsed content. The `repair_instruction`
-placeholder is filled with **sanitized** error hints (field location and error
-type/message only — never the rejected value, never a raw exception rendering).
-Refusals, incomplete responses, non-completed statuses, and transport/SDK
-errors are **not** application-retried. The OpenAI SDK's own transport retries
-operate separately underneath this. See ADR-023 for the full attempt budget.
+attempts in **both** adapters: one original request plus up to two repair
+retries. A repair retry occurs only for a Pydantic `ValidationError` during
+parsing, or a completed response with no parsed content. The
+`repair_instruction` placeholder is filled with **sanitized** error hints
+(field location and error type/message only — never the rejected value, never a
+raw exception rendering). Provider outcomes — refusals, incomplete/truncated
+responses, unexpected stop reasons or statuses, and any transport/SDK error —
+are **not** application-retried by either adapter; each becomes an immediate
+`LearningNoteProviderError`. Transport-level retry belongs to the **selected**
+provider SDK (`max_retries`, default 2 for both) and operates separately
+underneath the application policy; it is configured at client construction, not
+by application code. See ADR-023 for the full attempt budget and ADR-026 for the
+second provider.
 
 ## 7. Model-name and prompt-version storage
 

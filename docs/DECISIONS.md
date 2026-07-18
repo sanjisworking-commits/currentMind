@@ -2136,6 +2136,115 @@ authenticated/multi-user surfaces that change the threat boundary.
 
 ---
 
+## ADR-026: Add an Anthropic Learning Note generator behind the existing port
+
+**Status:** Accepted
+**Date:** 2026-07-17
+**Decision Owner:** Musa / Claude Code
+
+### Context
+
+Phase 1 shipped with a single `LearningNoteGenerator` implementation backed by
+the OpenAI Responses API (ADR-022). A user with an Anthropic (Claude) API key,
+but without usable OpenAI credentials, needs to run the processing pipeline.
+The application already depends only on the `LearningNoteGenerator` Protocol
+port, so a second provider can be added as an infrastructure adapter without
+touching the domain, application, or presentation layers.
+
+### Decision
+
+* **Add `AnthropicLearningNoteGenerator`** in
+  `app/infrastructure/anthropic_generator.py`, implementing the same
+  `LearningNoteGenerator` port via the Anthropic Messages API's native
+  structured-output parsing
+  (`client.messages.parse(..., output_format=LearningNoteContent)`). Pydantic
+  remains the sole validator of model output; an invalid response raises
+  `pydantic.ValidationError` exactly as the OpenAI adapter's `responses.parse`
+  does.
+* **Mirror the OpenAI adapter's behavior exactly:** the same fixed
+  three-attempt validation-repair policy (`MAX_VALIDATION_ATTEMPTS = 3`), the
+  same non-retryable provider outcomes (a `refusal` stop reason, a
+  `max_tokens` incomplete response, and unexpected stop reasons all raise
+  `LearningNoteProviderError` immediately), the same 60s timeout and two SDK
+  transport retries, and the same privacy rules (no article text, raw provider
+  output, API key, or rejected value ever logged).
+* **Reuse the source-neutral prompt files and prompt version.** Both providers
+  render `prompts/learning_note_v1_*` and record `prompt_version = "v1"`; the
+  prompts are provider-neutral and are not duplicated per provider. Each note
+  still records the `model_name` it was generated under, so notes from
+  different providers remain distinguishable.
+* **Select the provider with `LLM_PROVIDER`** (`openai` default, or
+  `anthropic`). The CLI composition root (`app/cli.py`) chooses the adapter and
+  requires that provider's key (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`);
+  `LLM_MODEL` is required for both. No other layer is aware of the provider.
+* **Only the adapter imports the `anthropic` SDK.** The abstraction boundary
+  (`LearningNoteGenerator`) is unchanged; the domain and application layers
+  never see either provider SDK.
+
+### Alternatives Considered
+
+1. Replace the OpenAI adapter entirely (rejected — removes a working,
+   documented provider and its tests for no benefit; the port exists precisely
+   to allow coexistence).
+2. Infer the provider from whichever API key is present (rejected — implicit
+   and ambiguous when both are set; an explicit `LLM_PROVIDER` is clearer and
+   testable).
+3. Extract the shared prompt-rendering and repair-instruction helpers into a
+   common module (deferred — the two helpers are small and pure; duplicating
+   them keeps the already-merged, tested OpenAI adapter untouched. Revisit if a
+   third provider is added).
+
+### Rationale
+
+The provider-neutral port was designed for exactly this substitution. Adding a
+sibling adapter keeps the change isolated to the infrastructure layer plus a
+small config/composition-root switch, preserves every reliability and privacy
+guarantee, and lets a Claude-key user run the pipeline unchanged.
+
+### Consequences
+
+#### Positive
+
+* Users can run processing with either OpenAI or Anthropic credentials.
+* The domain, application, and presentation layers are untouched; the change
+  validates that the `LearningNoteGenerator` port is a genuine seam.
+* Both adapters share prompts, prompt version, retry policy, and privacy rules,
+  so behavior stays consistent across providers.
+
+#### Negative
+
+* A new runtime dependency (`anthropic`) is added to `pyproject.toml` /
+  `uv.lock`.
+* The two small prompt-rendering helpers are duplicated between the two
+  adapters until a third provider justifies extracting them.
+* `LLM_MODEL` must name a Claude model that supports structured outputs when
+  `LLM_PROVIDER=anthropic` (e.g. `claude-haiku-4-5`); an incompatible model
+  surfaces as a normal provider/validation error, not a crash.
+
+### Verification note
+
+The automated suite (unit tests for both adapters, provider-selection and
+client-construction tests, `ruff`, and strict `mypy`) is the gate for this
+change. During development the Anthropic path was also exercised by a single
+**ad hoc happy-path smoke run** — one real Article processed once with a real
+Anthropic key — purely to confirm the adapter talks to the live API. That smoke
+run is **not** the controlled Phase 1 release validation and does **not** close
+the Phase 1 acceptance criterion: it did not follow the full RELEASE_CHECKLIST
+§4 / ADR-025 procedure (documented localhost one-entry RSS wrapper, disposable
+database migrated from empty, verified persisted `ANALYZED` Article, dashboard
+inspection, idempotent second run producing no second Learning Note, a
+sanitized report, complete disposable-data cleanup, and the provider the
+release checklist requires). Phase 1 remains incomplete until that controlled
+validation is separately approved and executed.
+
+### Revisit When
+
+Revisit if a third provider is added (extract shared helpers; consider a
+provider registry), or if the two providers' prompt needs diverge enough that a
+single `v1` prompt no longer serves both.
+
+---
+
 # 6. Decision Index
 
 | ID      | Decision                                                 | Status   |
@@ -2165,6 +2274,7 @@ authenticated/multi-user surfaces that change the threat boundary.
 | ADR-023 | Synchronous idempotent processing pipeline with ordered persistence and reconciliation | Accepted |
 | ADR-024 | Server-rendered read-only dashboard with an application query service | Accepted |
 | ADR-025 | Phase 1 automated verification and controlled live validation | Accepted |
+| ADR-026 | Add an Anthropic Learning Note generator behind the existing port | Accepted |
 
 ---
 

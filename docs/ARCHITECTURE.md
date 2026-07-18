@@ -26,8 +26,8 @@ adapters.
 ## 1. Domain layer (`app/domain/`)
 
 Pure, framework-free Pydantic v2 models and validation helpers (ADR-017).
-Contains no FastAPI, SQLAlchemy, OpenAI, feedparser, Trafilatura, or HTTP
-code.
+Contains no web framework, ORM, LLM SDK (neither OpenAI nor Anthropic), feed
+parser, extraction library, or HTTP code.
 
 * `ArticleCandidate` — a source-neutral discovered article, pre-persistence.
 * `Article` — a persisted article with a `processing_status`
@@ -87,7 +87,12 @@ Concrete adapters, the only place external SDKs are imported.
   `mappers.py`, `database.py` provide the ORM rows, explicit domain/ORM
   mapping, and engine/session factory.
 * `OpenAILearningNoteGenerator` (`openai_generator.py`) — the OpenAI Responses
-  API adapter; `prompt_loader.py` loads versioned prompt templates.
+  API adapter — and `AnthropicLearningNoteGenerator` (`anthropic_generator.py`)
+  — the Anthropic Messages API adapter (ADR-026). Both implement the single
+  `LearningNoteGenerator` port and share the source-neutral v1 prompts
+  (`prompt_loader.py` loads the versioned templates); provider selection
+  happens only in the CLI composition root, never in the domain or application
+  layers.
 * `config.py` (`Settings`), `logging.py`.
 
 ## 4. Presentation layer (`app/presentation/`)
@@ -104,12 +109,16 @@ point; `main.py` builds the FastAPI app for `uvicorn`.
 
 ## 5. Configuration flow
 
-`Settings` (`config.py`, pydantic-settings) reads five environment variables
-(optionally from `.env`): `OPENAI_API_KEY`, `DATABASE_URL`, `RSS_URL`,
-`LOG_LEVEL`, `LLM_MODEL`. The CLI composition root validates the
-processing-only requirements (`OPENAI_API_KEY`, `LLM_MODEL`) up front; the
-dashboard needs only `DATABASE_URL`. Nothing opens a database connection at
-import time; the engine connects lazily on first read.
+`Settings` (`config.py`, pydantic-settings) reads seven environment variables
+(optionally from `.env`): `LLM_PROVIDER`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`DATABASE_URL`, `RSS_URL`, `LOG_LEVEL`, `LLM_MODEL`. `LLM_PROVIDER` defaults to
+`openai` and is normalized (whitespace-trimmed, lower-cased) at composition. The
+CLI composition root selects the provider and validates its processing-only
+requirements up front: `LLM_MODEL` plus the selected provider's key — only
+`OPENAI_API_KEY` for `openai`, only `ANTHROPIC_API_KEY` for `anthropic` (the
+other provider's key is not required); an unknown provider is rejected with a
+safe error. The dashboard needs only `DATABASE_URL`. Nothing opens a database
+connection at import time; the engine connects lazily on first read.
 
 ## 6. Processing flow
 
@@ -187,10 +196,16 @@ replaces a Unit of Work (ADR-023).
 ## 11. Testing strategy
 
 Every automated test is external-service-free (ADR-012, ADR-025): no live
-RSS, Article page, or OpenAI call, and no development database. Fakes
-implement the application `Protocol`s structurally
-(`tests/application/processing_fakes.py`, `tests/infrastructure/openai_fakes.py`).
-Real adapters are exercised against real SQLite under a temporary Alembic
-migration (`tests/infrastructure/*_end_to_end.py`, `conftest.py`), which also
-serves as the persistence-across-reopen (restart-equivalent) coverage. Only
-the external network/LLM boundary is ever replaced.
+RSS, Article page, OpenAI, or Anthropic call, and no development database.
+Fakes implement the application `Protocol`s and the narrow provider-SDK seams
+structurally — `tests/application/processing_fakes.py`, and the handwritten
+OpenAI and Anthropic SDK-boundary fakes
+(`tests/infrastructure/openai_fakes.py`, `tests/infrastructure/anthropic_fakes.py`).
+The **real** generator adapters run against those fakes (never a fake
+`LearningNoteGenerator`), and provider selection in the composition root is
+tested offline in `tests/test_cli_composition.py` (with dotenv loading disabled
+so no local `.env` can influence the result). Real repository adapters are
+exercised against real SQLite under a temporary Alembic migration
+(`tests/infrastructure/*_end_to_end.py`, `conftest.py`), which also serves as
+the persistence-across-reopen (restart-equivalent) coverage. Only the external
+network/LLM boundary is ever replaced.

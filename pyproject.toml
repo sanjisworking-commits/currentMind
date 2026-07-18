@@ -16,6 +16,7 @@ dependencies = [
     "alembic>=1.14,<2.0",
     "openai>=2.0,<3.0",
     "jinja2>=3.1,<4.0",
+    "anthropic>=0.117.0,<1.0",
 ]
 
 [dependency-groups]
